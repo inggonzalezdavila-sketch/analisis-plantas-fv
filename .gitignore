@@ -1,0 +1,11 @@
+# Archivos cargados por las personas usuarias: nunca subir a GitHub.
+data/*.xlsx
+data/*.xls
+data/*.csv
+
+# Configuración local y archivos temporales.
+.env
+__pycache__/
+*.py[cod]
+.DS_Store
+desktop.ini

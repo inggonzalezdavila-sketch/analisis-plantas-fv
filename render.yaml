@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: analisis-plantas-fv
+    runtime: python
+    buildCommand: ""
+    startCommand: python app.py
+    autoDeploy: true
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: MAX_UPLOAD_MB
+        value: "50"

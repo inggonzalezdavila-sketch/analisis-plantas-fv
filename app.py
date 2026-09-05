@@ -1,0 +1,366 @@
+"""Servidor local para Análisis de Plantas FV.
+
+Ejecutar: python app.py
+Abrir: http://127.0.0.1:8000
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import sys
+import threading
+import uuid
+import zipfile
+from collections import Counter, defaultdict
+from datetime import datetime
+from http import HTTPStatus
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+from xml.etree import ElementTree as ET
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "data"
+STATIC_DIR = ROOT / "static"
+DATA_DIR.mkdir(exist_ok=True)
+NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+DATA_LOCK = threading.RLock()
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "50")) * 1024 * 1024
+
+
+def column_index(cell_reference: str) -> int:
+    letters = re.match(r"[A-Z]+", cell_reference).group(0)
+    result = 0
+    for letter in letters:
+        result = result * 26 + ord(letter) - 64
+    return result - 1
+
+
+def cell_value(cell: ET.Element) -> str:
+    if cell.get("t") == "inlineStr":
+        return "".join(cell.itertext()).strip()
+    value = cell.findtext(NS + "v")
+    return (value or "").strip()
+
+
+def number(value: str) -> float | None:
+    value = value.strip()
+    if not value or value in {"N/A", "-"}:
+        return None
+    try:
+        return float(value.replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_workbook(path: Path) -> dict:
+    """Lee el XML del XLSX: algunos exportes tienen dimensión A1 incorrecta."""
+    with zipfile.ZipFile(path) as book:
+        with book.open("xl/worksheets/sheet1.xml") as sheet:
+            headers: list[str] = []
+            rows: list[dict] = []
+            for _, element in ET.iterparse(sheet, events=("end",)):
+                if element.tag != NS + "row":
+                    continue
+                row_number = int(element.get("r", "0"))
+                cells = {column_index(cell.get("r")): cell_value(cell) for cell in element.findall(NS + "c")}
+                if row_number == 4:
+                    headers = [cells.get(index, "") for index in range(max(cells, default=-1) + 1)]
+                elif row_number >= 5 and headers:
+                    row = {headers[index]: value for index, value in cells.items() if index < len(headers)}
+                    if row.get("Hora de inicio") and row.get("Nombre del dispositivo"):
+                        rows.append(row)
+                element.clear()
+    return {"file": path.name, "rows": rows}
+
+
+def workbook_type(file_handle) -> str:
+    """Distingue reportes de telemetría de inventarios antes de reemplazar datos."""
+    try:
+        file_handle.seek(0)
+        with zipfile.ZipFile(file_handle) as book:
+            with book.open("xl/worksheets/sheet1.xml") as sheet:
+                text = []
+                for _, element in ET.iterparse(sheet, events=("end",)):
+                    if element.tag == NS + "row":
+                        text.extend(cell_value(cell) for cell in element.findall(NS + "c"))
+                        element.clear()
+                        if len(text) > 300:
+                            break
+        headers = set(text)
+        if "Hora de inicio" in headers and any(header.startswith("Potencia activa") for header in headers):
+            return "telemetry"
+        if "Estado del dispositivo" in headers and "Nombre de la planta" in headers:
+            return "inventory"
+        return "unknown"
+    except (KeyError, zipfile.BadZipFile, OSError, ET.ParseError):
+        return "invalid"
+    finally:
+        file_handle.seek(0)
+
+
+def device_name(value: str) -> str:
+    match = re.search(r"(Inverter\d+)", value)
+    return match.group(1) if match else value
+
+
+def analyse(files: list[Path]) -> dict:
+    parsed = [parse_workbook(file) for file in files]
+    # La misma ventana de fechas puede volver a cargarse. Se conserva una sola
+    # lectura por planta, inversor y marca de tiempo para no duplicar energía.
+    records_by_key = {}
+    for item in parsed:
+        for row in item["rows"]:
+            try:
+                timestamp = datetime.strptime(row["Hora de inicio"], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            record = {
+                "plant": row.get("Nombre del sitio", "Sin planta"),
+                "device": device_name(row.get("Nombre del dispositivo", "Sin inversor")),
+                "timestamp": timestamp,
+                "power": number(row.get("Potencia activa(kW)", "")),
+                "yield": number(row.get("Rendimiento total(kWh)", "")),
+                "temperature": number(row.get("Temperatura interna(℃)", "")),
+                "state": row.get("Estado del inversor", "Sin estado"),
+                "stringCurrents": {name: value for name, value in row.items() if name.startswith("Corriente de entrada")},
+            }
+            records_by_key[(record["plant"], record["device"], record["timestamp"])] = record
+    records = list(records_by_key.values())
+
+    by_plant_device = defaultdict(list)
+    by_plant = defaultdict(list)
+    for record in records:
+        by_plant_device[(record["plant"], record["device"])].append(record)
+        by_plant[record["plant"]].append(record)
+
+    plants = []
+    daily_series = defaultdict(lambda: defaultdict(float))
+    alerts = []
+    diagnostics = []
+    for plant, plant_records in sorted(by_plant.items()):
+        devices = []
+        plant_generation = 0.0
+        for (key_plant, device), values in sorted(by_plant_device.items()):
+            if key_plant != plant:
+                continue
+            values.sort(key=lambda x: x["timestamp"])
+            yields = [item["yield"] for item in values if item["yield"] is not None]
+            powers = [item["power"] for item in values if item["power"] is not None]
+            temperatures = [item["temperature"] for item in values if item["temperature"] is not None]
+            string_inputs = {field for item in values for field, reading in item["stringCurrents"].items() if reading not in {"", "N/A", "-"}}
+            solar_samples = [item for item in values if (item["power"] or 0) >= 5]
+            active_string_inputs = {
+                field for item in solar_samples for field, reading in item["stringCurrents"].items()
+                if (number(reading) or 0) > 0.2
+            }
+            unexpected_shutdowns = sum(
+                "apagado: apagado inesperado" in item["state"].lower() and 6 <= item["timestamp"].hour <= 18
+                for item in values
+            )
+            daily_yield = defaultdict(list)
+            for item in values:
+                if item["yield"] is not None:
+                    daily_yield[item["timestamp"].date().isoformat()].append(item["yield"])
+            generation_by_day = {day: max(day_values) - min(day_values) for day, day_values in daily_yield.items() if len(day_values) > 1}
+            generation = sum(generation_by_day.values())
+            plant_generation += generation
+            for day, total in generation_by_day.items():
+                daily_series[plant][day] += total
+            devices.append({
+                "name": device,
+                "records": len(values),
+                "generation": round(generation, 1),
+                "maxPower": round(max(powers), 1) if powers else None,
+                "maxTemperature": round(max(temperatures), 1) if temperatures else None,
+                "stringInputs": len(string_inputs),
+                "activeStringInputs": len(active_string_inputs),
+                "unexpectedShutdowns": unexpected_shutdowns,
+                "states": Counter(item["state"] for item in values).most_common(3),
+            })
+
+        best_generation = max((device["generation"] for device in devices), default=0)
+        for device in devices:
+            issues = []
+            action = "Mantener seguimiento con la próxima carga de datos."
+            level = "healthy"
+            if device["maxTemperature"] and device["maxTemperature"] >= 65:
+                issues.append(f"Temperatura interna máxima de {device['maxTemperature']} °C")
+                action = "Revisar ventilación, ventiladores, filtros y acumulación de suciedad."
+                level = "critical"
+            if device["unexpectedShutdowns"]:
+                issues.append(f"{device['unexpectedShutdowns']} lecturas de apagado inesperado en horario diurno")
+                action = "Consultar el registro de alarmas y verificar protecciones, tensión y frecuencia de red."
+                level = "critical"
+            if device["stringInputs"] and device["activeStringInputs"] < device["stringInputs"]:
+                inactive = device["stringInputs"] - device["activeStringInputs"]
+                issues.append(f"{inactive} entrada(s) FV sin corriente durante operación")
+                if level != "critical":
+                    level = "warning"
+                    action = "Comparar corrientes y tensiones de las entradas FV; revisar fusibles, conectores, strings y sombreado."
+            loss = max(best_generation - device["generation"], 0)
+            if best_generation and device["generation"] < best_generation * 0.90:
+                issues.append(f"Generó {loss:.0f} kWh menos que el mejor inversor comparable")
+                if level == "healthy":
+                    level = "warning"
+                    action = "Comparar MPPT, entradas FV y estado operativo con los inversores pares."
+            if not issues:
+                issues.append("Sin desviaciones detectadas con las reglas actuales")
+            diagnostics.append({
+                "plant": plant,
+                "inverter": device["name"],
+                "level": level,
+                "issues": issues,
+                "action": action,
+                "estimatedLoss": round(loss, 1),
+                "stringInputs": device["stringInputs"],
+                "activeStringInputs": device["activeStringInputs"],
+            })
+
+        times = sorted({item["timestamp"] for item in plant_records})
+        gaps = [(later - earlier).total_seconds() / 60 for earlier, later in zip(times, times[1:])]
+        long_gaps = [gap for gap in gaps if gap > 15]
+        plants.append({
+            "name": plant,
+            "records": len(plant_records),
+            "generation": round(plant_generation, 1),
+            "devices": devices,
+            "dataGaps": len(long_gaps),
+            "maxGapHours": round(max(long_gaps, default=0) / 60, 1),
+        })
+        if long_gaps:
+            alerts.append({"level": "warning", "plant": plant, "title": "Huecos de telemetría", "detail": f"{len(long_gaps)} interrupciones mayores a 15 minutos; la mayor duró {max(long_gaps) / 60:.1f} horas.", "action": "Revisar conectividad, energía del logger y la disponibilidad de la plataforma."})
+        for device in devices:
+            if device["maxTemperature"] and device["maxTemperature"] >= 65:
+                alerts.append({"level": "danger", "plant": plant, "title": f"Temperatura alta en {device['name']}", "detail": f"Máximo registrado: {device['maxTemperature']} °C.", "action": "Inspeccionar ventilación, ventiladores y acumulación de suciedad."})
+
+    for plant in plants:
+        powers = [device["maxPower"] for device in plant["devices"] if device["maxPower"]]
+        if len(powers) > 1 and min(powers) < max(powers) * 0.85:
+            low = next(device for device in plant["devices"] if device["maxPower"] == min(powers))
+            alerts.append({"level": "warning", "plant": plant["name"], "title": f"Pico de potencia bajo en {low['name']}", "detail": f"Máximo: {low['maxPower']} kW frente a {max(powers)} kW en su par.", "action": "Comparar strings FV, MPPT, sombreado y restricciones de operación."})
+
+    ranking = sorted(plants, key=lambda plant: plant["generation"], reverse=True)
+    comparison = None
+    if len(ranking) > 1:
+        highest, lowest = ranking[0], ranking[-1]
+        difference = highest["generation"] - lowest["generation"]
+        comparison = {"highestPlant": highest["name"], "lowestPlant": lowest["name"], "difference": round(difference, 1), "percent": round((difference / lowest["generation"] * 100) if lowest["generation"] else 0, 1)}
+
+    return {
+        "updatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "sourceFiles": [item["file"] for item in parsed],
+        "summary": {"plants": len(plants), "inverters": len(by_plant_device), "records": len(records), "generation": round(sum(plant["generation"] for plant in plants), 1)},
+        "plants": plants,
+        "dailySeries": [{"plant": plant, "date": day, "generation": round(value, 1)} for plant, days in sorted(daily_series.items()) for day, value in sorted(days.items())],
+        "alerts": alerts,
+        "comparison": comparison,
+        "diagnostics": diagnostics,
+    }
+
+
+def available_files() -> list[Path]:
+    return sorted(DATA_DIR.glob("*.xlsx"), key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+class Handler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        route = urlparse(self.path).path
+        if route == "/api/dashboard":
+            # No analizar un listado mientras otra petición está sustituyendo los archivos.
+            with DATA_LOCK:
+                files = available_files()
+                if not files:
+                    self.send_json({"error": "Aún no hay archivos .xlsx cargados."}, HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    result = analyse(files)
+                    if not result["summary"]["records"]:
+                        self.send_json({"error": "Los archivos cargados no contienen telemetría histórica de generación. Carga un reporte con Hora de inicio, Potencia activa y Energía/Rendimiento total."}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                        return
+                    self.send_json(result)
+                except Exception as error:
+                    self.send_json({"error": f"No se pudieron analizar los archivos: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if route == "/":
+            self.path = "/static/index.html"
+        return super().do_GET()
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/upload":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            self.send_json({"error": "Envía archivos usando multipart/form-data."}, HTTPStatus.BAD_REQUEST)
+            return
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length > MAX_UPLOAD_BYTES:
+            self.send_json({"error": f"El archivo excede el límite de {MAX_UPLOAD_BYTES // 1024 // 1024} MB."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+        import cgi
+        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type})
+        uploads = form["files"] if "files" in form else []
+        if not isinstance(uploads, list):
+            uploads = [uploads]
+        valid_uploads = [(Path(upload.filename or "").name, upload) for upload in uploads]
+        valid_uploads = [(filename, upload) for filename, upload in valid_uploads if filename.lower().endswith(".xlsx")]
+        if not valid_uploads:
+            self.send_json({"error": "Selecciona al menos un archivo XLSX válido."}, HTTPStatus.BAD_REQUEST)
+            return
+        file_types = [(filename, workbook_type(upload.file)) for filename, upload in valid_uploads]
+        invalid_files = [filename for filename, kind in file_types if kind != "telemetry"]
+        if invalid_files:
+            descriptions = {
+                "inventory": "es un inventario de dispositivos; no incluye generación ni mediciones históricas",
+                "unknown": "no tiene el formato de telemetría requerido",
+                "invalid": "no se pudo leer como un archivo XLSX válido",
+            }
+            details = "; ".join(f"{filename}: {descriptions[kind]}" for filename, kind in file_types if kind != "telemetry")
+            self.send_json({"error": f"No se reemplazaron los datos. {details}. Exporta desde FusionSolar el informe histórico por intervalos con potencia, energía y hora de inicio."}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            return
+
+        with DATA_LOCK:
+            # Una carga representa el período que la persona desea analizar. Limpiar
+            # el lote anterior evita sumar exportaciones repetidas o de otra planta.
+            for previous_file in DATA_DIR.glob("*.xlsx"):
+                previous_file.unlink()
+
+            saved = []
+            for filename, upload in valid_uploads:
+                destination = DATA_DIR / f"{uuid.uuid4().hex[:8]}_{filename}"
+                with destination.open("wb") as output:
+                    shutil.copyfileobj(upload.file, output)
+                saved.append(filename)
+        self.send_json({"message": "Datos reemplazados", "files": saved}, HTTPStatus.CREATED)
+
+    def do_DELETE(self):
+        if urlparse(self.path).path != "/api/data":
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        with DATA_LOCK:
+            deleted = 0
+            for previous_file in DATA_DIR.glob("*.xlsx"):
+                previous_file.unlink()
+                deleted += 1
+        self.send_json({"message": "Datos eliminados", "deleted": deleted})
+
+    def send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK):
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format, *args):
+        print(f"[{self.log_date_time_string()}] {format % args}")
+
+
+if __name__ == "__main__":
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    print(f"Análisis de Plantas FV disponible en http://{host}:{port}")
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
