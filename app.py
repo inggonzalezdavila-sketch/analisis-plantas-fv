@@ -15,8 +15,11 @@ import uuid
 import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime
+from email.parser import BytesParser
+from email.policy import default
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
@@ -300,11 +303,21 @@ class Handler(SimpleHTTPRequestHandler):
         if content_length > MAX_UPLOAD_BYTES:
             self.send_json({"error": f"El archivo excede el límite de {MAX_UPLOAD_BYTES // 1024 // 1024} MB."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return
-        import cgi
-        form = cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": content_type})
-        uploads = form["files"] if "files" in form else []
-        if not isinstance(uploads, list):
-            uploads = [uploads]
+        # cgi fue eliminado en Python 3.13. Parsear multipart con email mantiene
+        # la carga compatible tanto localmente como en hosts con Python reciente.
+        raw_body = self.rfile.read(content_length)
+        message = BytesParser(policy=default).parsebytes(
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + raw_body
+        )
+        uploads = []
+        for part in message.iter_parts():
+            if part.get_content_disposition() != "form-data":
+                continue
+            if part.get_param("name", header="content-disposition") != "files":
+                continue
+            filename = part.get_filename()
+            if filename:
+                uploads.append(type("UploadedFile", (), {"filename": filename, "file": BytesIO(part.get_payload(decode=True) or b"")}))
         valid_uploads = [(Path(upload.filename or "").name, upload) for upload in uploads]
         valid_uploads = [(filename, upload) for filename, upload in valid_uploads if filename.lower().endswith(".xlsx")]
         if not valid_uploads:
