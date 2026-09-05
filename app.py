@@ -360,7 +360,8 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    host = os.environ.get("HOST", "127.0.0.1")
+    # Render entrega PORT; localmente se conserva el acceso solo desde este equipo.
+    host = os.environ.get("HOST", "0.0.0.0" if "PORT" in os.environ else "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
     print(f"Análisis de Plantas FV disponible en http://{host}:{port}")
     ThreadingHTTPServer((host, port), Handler).serve_forever()
