@@ -16,12 +16,11 @@ import uuid
 import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime
-from email.parser import BytesParser
-from email.policy import default
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
@@ -80,29 +79,26 @@ def parse_workbook(path: Path) -> dict:
     return {"file": path.name, "rows": rows}
 
 
-def workbook_type(file_handle) -> str:
-    """Distingue reportes de telemetría de inventarios antes de reemplazar datos."""
-    try:
-        file_handle.seek(0)
-        with zipfile.ZipFile(file_handle) as book:
-            with book.open("xl/worksheets/sheet1.xml") as sheet:
-                text = []
-                for _, element in ET.iterparse(sheet, events=("end",)):
-                    if element.tag == NS + "row":
-                        text.extend(cell_value(cell) for cell in element.findall(NS + "c"))
-                        element.clear()
-                        if len(text) > 300:
-                            break
-        headers = set(text)
-        if "Hora de inicio" in headers and any(header.startswith("Potencia activa") for header in headers):
-            return "telemetry"
-        if "Estado del dispositivo" in headers and "Nombre de la planta" in headers:
-            return "inventory"
-        return "unknown"
-    except (KeyError, zipfile.BadZipFile, OSError, ET.ParseError):
-        return "invalid"
-    finally:
-        file_handle.seek(0)
+def multipart_uploads(content_type: str, body: bytes) -> list[SimpleNamespace]:
+    """Extrae archivos multipart sin transformar bytes binarios de XLSX."""
+    boundary_match = re.search(r'boundary=(?:"([^"]+)"|([^;\s]+))', content_type, re.IGNORECASE)
+    if not boundary_match:
+        return []
+    boundary = (boundary_match.group(1) or boundary_match.group(2)).encode("utf-8")
+    uploads = []
+    for section in body.split(b"--" + boundary):
+        if b"Content-Disposition: form-data" not in section or b"\r\n\r\n" not in section:
+            continue
+        header_bytes, content = section.split(b"\r\n\r\n", 1)
+        header_text = header_bytes.decode("utf-8", errors="replace")
+        field_match = re.search(r'name="([^"]+)"', header_text, re.IGNORECASE)
+        filename_match = re.search(r'filename="([^"]+)"', header_text, re.IGNORECASE)
+        if not field_match or field_match.group(1) != "files" or not filename_match:
+            continue
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        uploads.append(SimpleNamespace(filename=filename_match.group(1), file=BytesIO(content)))
+    return uploads
 
 
 def device_name(value: str) -> str:
@@ -304,21 +300,10 @@ class Handler(SimpleHTTPRequestHandler):
         if content_length > MAX_UPLOAD_BYTES:
             self.send_json({"error": f"El archivo excede el límite de {MAX_UPLOAD_BYTES // 1024 // 1024} MB."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return
-        # cgi fue eliminado en Python 3.13. Parsear multipart con email mantiene
-        # la carga compatible tanto localmente como en hosts con Python reciente.
+        # cgi fue eliminado en Python 3.13. El lector conserva los bytes XLSX
+        # tal como los envía el navegador, incluido Chrome para Android.
         raw_body = self.rfile.read(content_length)
-        message = BytesParser(policy=default).parsebytes(
-            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + raw_body
-        )
-        uploads = []
-        for part in message.iter_parts():
-            if part.get_content_disposition() != "form-data":
-                continue
-            if part.get_param("name", header="content-disposition") != "files":
-                continue
-            filename = part.get_filename()
-            if filename:
-                uploads.append(type("UploadedFile", (), {"filename": filename, "file": BytesIO(part.get_payload(decode=True) or b"")}))
+        uploads = multipart_uploads(content_type, raw_body)
         valid_uploads = [(Path(upload.filename or "").name, upload) for upload in uploads]
         valid_uploads = [(filename, upload) for filename, upload in valid_uploads if filename.lower().endswith(".xlsx")]
         if not valid_uploads:
