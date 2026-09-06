@@ -42,11 +42,27 @@ def column_index(cell_reference: str) -> int:
     return result - 1
 
 
-def cell_value(cell: ET.Element) -> str:
+def cell_value(cell: ET.Element, shared_strings: list[str] | None = None) -> str:
     if cell.get("t") == "inlineStr":
         return "".join(cell.itertext()).strip()
     value = cell.findtext(NS + "v")
-    return (value or "").strip()
+    value = (value or "").strip()
+    if cell.get("t") == "s" and shared_strings:
+        try:
+            return shared_strings[int(value)]
+        except (ValueError, IndexError):
+            return ""
+    return value
+
+
+def workbook_shared_strings(book: zipfile.ZipFile) -> list[str]:
+    """Lee los encabezados cuando el XLSX usa el formato sharedStrings de Excel."""
+    try:
+        with book.open("xl/sharedStrings.xml") as source:
+            root = ET.parse(source).getroot()
+        return ["".join(item.itertext()).strip() for item in root.findall(NS + "si")]
+    except KeyError:
+        return []
 
 
 def number(value: str) -> float | None:
@@ -83,6 +99,7 @@ def parse_workbook(path: Path) -> dict:
     """Lee exportes XLSX aunque varíen la hoja o la ubicación de los encabezados."""
     rows: list[dict] = []
     with zipfile.ZipFile(path) as book:
+        shared_strings = workbook_shared_strings(book)
         sheets = [name for name in book.namelist() if name.startswith("xl/worksheets/") and name.endswith(".xml")]
         for sheet_name in sheets:
             with book.open(sheet_name) as sheet:
@@ -91,7 +108,7 @@ def parse_workbook(path: Path) -> dict:
                 for _, element in ET.iterparse(sheet, events=("end",)):
                     if element.tag != NS + "row":
                         continue
-                    cells = {column_index(cell.get("r")): cell_value(cell) for cell in element.findall(NS + "c")}
+                    cells = {column_index(cell.get("r")): cell_value(cell, shared_strings) for cell in element.findall(NS + "c")}
                     detected = {index: recognised_column(value) for index, value in cells.items()}
                     if "hour" in detected.values() and "device" in detected.values():
                         columns = {index: kind for index, kind in detected.items() if kind}
