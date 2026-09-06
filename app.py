@@ -217,6 +217,8 @@ def analyse(files: list[Path]) -> dict:
                 "records": len(values),
                 "generation": round(generation, 1),
                 "maxPower": round(max(powers), 1) if powers else None,
+                "latestPower": round(next((item["power"] for item in reversed(values) if item["power"] is not None), 0), 1),
+                "latestTimestamp": values[-1]["timestamp"].strftime("%Y-%m-%d %H:%M") if values else None,
                 "maxTemperature": round(max(temperatures), 1) if temperatures else None,
                 "stringInputs": len(string_inputs),
                 "activeStringInputs": len(active_string_inputs),
@@ -270,6 +272,8 @@ def analyse(files: list[Path]) -> dict:
             "records": len(plant_records),
             "generation": round(plant_generation, 1),
             "devices": devices,
+            "latestPower": round(sum(device["latestPower"] for device in devices), 1),
+            "latestTimestamp": max((device["latestTimestamp"] for device in devices if device["latestTimestamp"]), default=None),
             "dataGaps": len(long_gaps),
             "maxGapHours": round(max(long_gaps, default=0) / 60, 1),
         })
