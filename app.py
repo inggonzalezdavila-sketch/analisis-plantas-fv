@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import threading
 import uuid
 import zipfile
@@ -323,30 +324,38 @@ class Handler(SimpleHTTPRequestHandler):
         if not valid_uploads:
             self.send_json({"error": "Selecciona al menos un archivo XLSX válido."}, HTTPStatus.BAD_REQUEST)
             return
-        file_types = [(filename, workbook_type(upload.file)) for filename, upload in valid_uploads]
-        invalid_files = [filename for filename, kind in file_types if kind != "telemetry"]
-        if invalid_files:
-            descriptions = {
-                "inventory": "es un inventario de dispositivos; no incluye generación ni mediciones históricas",
-                "unknown": "no tiene el formato de telemetría requerido",
-                "invalid": "no se pudo leer como un archivo XLSX válido",
-            }
-            details = "; ".join(f"{filename}: {descriptions[kind]}" for filename, kind in file_types if kind != "telemetry")
-            self.send_json({"error": f"No se reemplazaron los datos. {details}. Exporta desde FusionSolar el informe histórico por intervalos con potencia, energía y hora de inicio."}, HTTPStatus.UNPROCESSABLE_ENTITY)
-            return
-
-        with DATA_LOCK:
-            # Una carga representa el período que la persona desea analizar. Limpiar
-            # el lote anterior evita sumar exportaciones repetidas o de otra planta.
-            for previous_file in DATA_DIR.glob("*.xlsx"):
-                previous_file.unlink()
-
-            saved = []
+        # Guardar primero en un área temporal y validar registros reales. Esto
+        # admite variantes de encabezados de FusionSolar sin aceptar inventarios.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            candidates = []
+            invalid_files = []
             for filename, upload in valid_uploads:
-                destination = DATA_DIR / f"{uuid.uuid4().hex[:8]}_{filename}"
-                with destination.open("wb") as output:
+                temporary_file = Path(temporary_directory) / f"{uuid.uuid4().hex}_{filename}"
+                with temporary_file.open("wb") as output:
                     shutil.copyfileobj(upload.file, output)
-                saved.append(filename)
+                try:
+                    record_count = len(parse_workbook(temporary_file)["rows"])
+                except (KeyError, OSError, ET.ParseError, zipfile.BadZipFile):
+                    record_count = 0
+                if record_count:
+                    candidates.append((filename, temporary_file))
+                else:
+                    invalid_files.append(filename)
+            if invalid_files:
+                self.send_json({"error": f"No se reemplazaron los datos. {', '.join(invalid_files)} no contiene registros históricos de telemetría. Exporta desde FusionSolar un informe por intervalos con hora, potencia y energía."}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+
+            with DATA_LOCK:
+                # Una carga representa el período que la persona desea analizar. Limpiar
+                # el lote anterior evita sumar exportaciones repetidas o de otra planta.
+                for previous_file in DATA_DIR.glob("*.xlsx"):
+                    previous_file.unlink()
+
+                saved = []
+                for filename, temporary_file in candidates:
+                    destination = DATA_DIR / f"{uuid.uuid4().hex[:8]}_{filename}"
+                    shutil.copyfile(temporary_file, destination)
+                    saved.append(filename)
         self.send_json({"message": "Datos reemplazados", "files": saved}, HTTPStatus.CREATED)
 
     def do_DELETE(self):
