@@ -273,6 +273,7 @@ def analyse(files: list[Path]) -> dict:
             "generation": round(plant_generation, 1),
             "devices": devices,
             "latestPower": round(sum(device["latestPower"] for device in devices), 1),
+            "peakPower": round(sum(device["maxPower"] or 0 for device in devices), 1),
             "latestTimestamp": max((device["latestTimestamp"] for device in devices if device["latestTimestamp"]), default=None),
             "dataGaps": len(long_gaps),
             "maxGapHours": round(max(long_gaps, default=0) / 60, 1),
