@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import unicodedata
 import uuid
 import zipfile
 from collections import Counter, defaultdict
@@ -58,24 +59,66 @@ def number(value: str) -> float | None:
         return None
 
 
+def normalise_header(value: str) -> str:
+    """Compara encabezados aunque FusionSolar cambie tildes, espacios o unidades."""
+    decomposed = unicodedata.normalize("NFKD", value)
+    return "".join(character for character in decomposed.lower() if character.isalnum())
+
+
+def recognised_column(header: str) -> str | None:
+    key = normalise_header(header)
+    aliases = {
+        "hour": {"horadeinicio", "horainicio", "fechahorainicio"},
+        "device": {"nombredeldispositivo", "nombrededispositivo", "nombredelinversor"},
+        "plant": {"nombredelsitio", "nombredelaplanta", "nombredelplanta"},
+        "power": {"potenciaactivakw", "potenciaactiva"},
+        "yield": {"rendimientototalkwh", "rendimientokwh", "energiatotalkwh", "energiaacumuladakwh"},
+        "temperature": {"temperaturainternac", "temperaturainterna"},
+        "state": {"estadodelinversor", "estadoinversor", "estadodeldispositivo"},
+    }
+    return next((name for name, values in aliases.items() if key in values), None)
+
+
 def parse_workbook(path: Path) -> dict:
-    """Lee el XML del XLSX: algunos exportes tienen dimensión A1 incorrecta."""
+    """Lee exportes XLSX aunque varíen la hoja o la ubicación de los encabezados."""
+    rows: list[dict] = []
     with zipfile.ZipFile(path) as book:
-        with book.open("xl/worksheets/sheet1.xml") as sheet:
-            headers: list[str] = []
-            rows: list[dict] = []
-            for _, element in ET.iterparse(sheet, events=("end",)):
-                if element.tag != NS + "row":
-                    continue
-                row_number = int(element.get("r", "0"))
-                cells = {column_index(cell.get("r")): cell_value(cell) for cell in element.findall(NS + "c")}
-                if row_number == 4:
-                    headers = [cells.get(index, "") for index in range(max(cells, default=-1) + 1)]
-                elif row_number >= 5 and headers:
-                    row = {headers[index]: value for index, value in cells.items() if index < len(headers)}
-                    if row.get("Hora de inicio") and row.get("Nombre del dispositivo"):
-                        rows.append(row)
-                element.clear()
+        sheets = [name for name in book.namelist() if name.startswith("xl/worksheets/") and name.endswith(".xml")]
+        for sheet_name in sheets:
+            with book.open(sheet_name) as sheet:
+                columns: dict[int, str] = {}
+                string_columns: dict[int, str] = {}
+                for _, element in ET.iterparse(sheet, events=("end",)):
+                    if element.tag != NS + "row":
+                        continue
+                    cells = {column_index(cell.get("r")): cell_value(cell) for cell in element.findall(NS + "c")}
+                    detected = {index: recognised_column(value) for index, value in cells.items()}
+                    if "hour" in detected.values() and "device" in detected.values():
+                        columns = {index: kind for index, kind in detected.items() if kind}
+                        string_columns = {
+                            index: f"Corriente de entrada {index + 1}"
+                            for index, value in cells.items()
+                            if normalise_header(value).startswith("corrientedeentrada")
+                        }
+                    elif columns:
+                        row = {
+                            "Hora de inicio": cells.get(next((index for index, kind in columns.items() if kind == "hour"), -1), ""),
+                            "Nombre del dispositivo": cells.get(next((index for index, kind in columns.items() if kind == "device"), -1), ""),
+                        }
+                        optional_fields = {
+                            "plant": "Nombre del sitio", "power": "Potencia activa(kW)",
+                            "yield": "Rendimiento total(kWh)", "temperature": "Temperatura interna(℃)",
+                            "state": "Estado del inversor",
+                        }
+                        for kind, output_name in optional_fields.items():
+                            source = next((index for index, column_kind in columns.items() if column_kind == kind), None)
+                            if source is not None:
+                                row[output_name] = cells.get(source, "")
+                        for index, output_name in string_columns.items():
+                            row[output_name] = cells.get(index, "")
+                        if row["Hora de inicio"] and row["Nombre del dispositivo"]:
+                            rows.append(row)
+                    element.clear()
     return {"file": path.name, "rows": rows}
 
 
