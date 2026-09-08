@@ -170,16 +170,35 @@ def fusionsolar_plants() -> list[dict]:
         return plants
 
 
+def metric_number(value):
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value.strip()):
+        return float(value)
+    return None
+
+
 def metric_value(item: dict, *keys: str):
+    expected = {re.sub(r"[^a-z0-9]", "", key.lower()) for key in keys}
     sources = (item, item.get("dataItemMap", {}))
     for source in sources:
         if isinstance(source, dict):
-            for key in keys:
-                value = source.get(key)
-                if isinstance(value, (int, float)):
-                    return value
-                if isinstance(value, str) and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value.strip()):
-                    return float(value)
+            for key, value in source.items():
+                normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                if normalized in expected:
+                    numeric = metric_number(value)
+                    if numeric is not None:
+                        return numeric
+    return None
+
+
+def metric_keys(item: dict) -> list[str]:
+    """Expone únicamente nombres de indicadores para diagnóstico; nunca valores ni secretos."""
+    keys = set()
+    for source in (item, item.get("dataItemMap", {})):
+        if isinstance(source, dict):
+            keys.update(str(key) for key in source if key not in {"stationCode", "code"})
+    return sorted(keys)
     return None
 
 
@@ -216,13 +235,16 @@ def fusionsolar_overview() -> list[dict]:
         for plant in plants:
             kpi = kpis_by_code.get(plant["code"], {})
             health = metric_value(kpi, "real_health_state", "realHealthState")
+            active_power = metric_value(
+                kpi,
+                "active_power", "activePower", "active_power_kw", "activePowerKw",
+                "inverter_power", "inverterPower", "inverter_power_kw", "inverterPowerKw",
+                "pv_power", "pvPower", "pv_power_kw", "pvPowerKw", "output_power", "outputPower", "power",
+            )
             overview.append({
                 **plant,
-                "activePower": metric_value(
-                    kpi,
-                    "active_power", "activePower", "inverter_power", "inverterPower",
-                    "pv_power", "pvPower", "output_power", "outputPower", "power",
-                ),
+                "activePower": active_power,
+                "availableKpis": metric_keys(kpi) if active_power is None else [],
                 "dayGeneration": metric_value(kpi, "day_power", "dayPower"),
                 "monthGeneration": metric_value(kpi, "month_power", "monthPower"),
                 "totalGeneration": metric_value(kpi, "total_power", "totalPower"),
