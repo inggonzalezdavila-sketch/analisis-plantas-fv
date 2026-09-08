@@ -181,6 +181,11 @@ def metric_value(item: dict, *keys: str):
     return None
 
 
+def watt_hours_to_kwh(value):
+    """Los KPI horarios de estación FusionSolar llegan en Wh; la UI usa kWh."""
+    return round(value / 1000, 3) if isinstance(value, (int, float)) else None
+
+
 def fusionsolar_overview() -> list[dict]:
     """Consulta KPI actuales de planta; no invoca control, escritura ni configuración."""
     now = time.time()
@@ -275,9 +280,9 @@ def fusionsolar_daily_report(report_date: date) -> dict:
                 continue
             records_by_code[code].append({
                 "time": when.strftime("%H:%M"),
-                "generation": metric_value(item, "inverter_power", "inverterPower", "pv_power", "pvPower"),
-                "grid": metric_value(item, "ongrid_power", "ongridPower"),
-                "theoretical": metric_value(item, "theory_power", "theoryPower"),
+                "generation": watt_hours_to_kwh(metric_value(item, "inverter_power", "inverterPower", "pv_power", "pvPower")),
+                "grid": watt_hours_to_kwh(metric_value(item, "ongrid_power", "ongridPower")),
+                "theoretical": watt_hours_to_kwh(metric_value(item, "theory_power", "theoryPower")),
             })
         report_plants = []
         for plant in plants:
