@@ -178,7 +178,8 @@ def metric_number(value):
     return None
 
 
-def metric_value(item: dict, *keys: str):
+def metric_value_and_key(item: dict, *keys: str):
+    """Obtiene un KPI numérico y el nombre exacto con que FusionSolar lo entregó."""
     expected = {re.sub(r"[^a-z0-9]", "", key.lower()) for key in keys}
     sources = (item, item.get("dataItemMap", {}))
     for source in sources:
@@ -188,8 +189,12 @@ def metric_value(item: dict, *keys: str):
                 if normalized in expected:
                     numeric = metric_number(value)
                     if numeric is not None:
-                        return numeric
-    return None
+                        return numeric, str(key)
+    return None, None
+
+
+def metric_value(item: dict, *keys: str):
+    return metric_value_and_key(item, *keys)[0]
 
 
 def metric_keys(item: dict) -> list[str]:
@@ -382,11 +387,19 @@ def fusionsolar_daily_report(report_date: date, selected_codes: list[str] | None
             when = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).astimezone(timezone(timedelta(hours=-5)))
             if when.date() != report_date:
                 continue
+            radiation, radiation_kpi = metric_value_and_key(
+                item,
+                "irradiance", "irradiance_wm2", "irradianceWm2",
+                "solar_irradiance", "solarIrradiance", "radiation_intensity",
+                "radiationIntensity", "solar_radiation", "solarRadiation",
+            )
             records_by_code[code].append({
                 "time": when.strftime("%H:%M"),
                 "generation": metric_value(item, "inverter_power", "inverterPower", "pv_power", "pvPower"),
                 "grid": metric_value(item, "ongrid_power", "ongridPower"),
                 "theoretical": metric_value(item, "theory_power", "theoryPower"),
+                "radiation": radiation,
+                "radiationKpi": radiation_kpi,
             })
         report_plants = []
         for plant in plants:
