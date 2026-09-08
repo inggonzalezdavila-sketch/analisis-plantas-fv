@@ -314,6 +314,8 @@ def fusionsolar_overview() -> list[dict]:
                 "activePower": active_power,
                 "availableKpis": metric_keys(kpi) if active_power is None else [],
                 "dayGeneration": metric_value(kpi, "day_power", "dayPower"),
+                "dayUseEnergy": metric_value(kpi, "day_use_energy", "dayUseEnergy"),
+                "dayOnGridEnergy": metric_value(kpi, "day_on_grid_energy", "dayOnGridEnergy"),
                 "monthGeneration": metric_value(kpi, "month_power", "monthPower"),
                 "totalGeneration": metric_value(kpi, "total_power", "totalPower"),
                 "health": health_names.get(health, "Sin estado reportado"),
