@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shutil
+import ssl
 import sys
 import tempfile
 import threading
@@ -31,7 +32,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
@@ -120,7 +121,12 @@ def fusionsolar_plants() -> list[dict]:
 
         base_url, username, system_code = fusionsolar_configuration()
         cookies = CookieJar()
-        opener = build_opener(HTTPCookieProcessor(cookies))
+        # Algunos portales industriales cierran conexiones TLS modernas desde
+        # servicios cloud. TLS 1.2 conserva cifrado seguro y mejora compatibilidad.
+        tls_context = ssl.create_default_context()
+        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        tls_context.maximum_version = ssl.TLSVersion.TLSv1_2
+        opener = build_opener(HTTPCookieProcessor(cookies), HTTPSHandler(context=tls_context))
         prepare_fusionsolar_session(opener, base_url)
         login, login_headers = fusionsolar_post(
             opener, f"{base_url}/thirdData/login", {"userName": username, "systemCode": system_code}
