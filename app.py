@@ -49,7 +49,7 @@ MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
 LOGIN_LOCK = threading.Lock()
 FUSIONSOLAR_CACHE_SECONDS = 5 * 60
-FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None}
+FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None}
 FUSIONSOLAR_LOCK = threading.Lock()
 FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
 
@@ -111,6 +111,48 @@ def prepare_fusionsolar_session(opener, base_url: str) -> None:
         pass
 
 
+def fusionsolar_authenticated_client():
+    """Abre una sesión temporal de API para consultas de solo lectura."""
+    base_url, username, system_code = fusionsolar_configuration()
+    cookies = CookieJar()
+    tls_context = ssl.create_default_context()
+    tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls_context.maximum_version = ssl.TLSVersion.TLSv1_2
+    opener = build_opener(HTTPCookieProcessor(cookies), HTTPSHandler(context=tls_context))
+    prepare_fusionsolar_session(opener, base_url)
+    login, login_headers = fusionsolar_post(
+        opener, f"{base_url}/thirdData/login", {"userName": username, "systemCode": system_code}
+    )
+    if not isinstance(login, dict) or not login.get("success"):
+        raise FusionSolarError("FusionSolar no aceptó la cuenta API. Revisa usuario, contraseña, vigencia y permisos.")
+    token = login_headers.get("XSRF-TOKEN")
+    if not token:
+        token = next((cookie.value for cookie in cookies if cookie.name.upper() == "XSRF-TOKEN"), None)
+    if not token:
+        raise FusionSolarError("FusionSolar no entregó una sesión válida. Revisa que las Interfaces API básicas sigan activas.")
+    return base_url, opener, token
+
+
+def station_list(response: dict) -> list[dict]:
+    raw_data = response.get("data")
+    if isinstance(raw_data, dict):
+        for key in ("list", "stations", "stationList"):
+            if isinstance(raw_data.get(key), list):
+                raw_data = raw_data[key]
+                break
+    if not isinstance(raw_data, list):
+        return []
+    plants = []
+    for item in raw_data:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("stationName") or item.get("name")
+        code = item.get("stationCode") or item.get("code")
+        if isinstance(name, str) and name.strip():
+            plants.append({"name": name.strip(), "code": str(code) if code is not None else ""})
+    return plants
+
+
 def fusionsolar_plants() -> list[dict]:
     """Lista plantas autorizadas con la API básica, sin llamadas de control."""
     now = time.time()
@@ -118,54 +160,73 @@ def fusionsolar_plants() -> list[dict]:
         cached = FUSIONSOLAR_CACHE.get("plants")
         if cached is not None and now < float(FUSIONSOLAR_CACHE["expires"]):
             return cached
-
-        base_url, username, system_code = fusionsolar_configuration()
-        cookies = CookieJar()
-        # Algunos portales industriales cierran conexiones TLS modernas desde
-        # servicios cloud. TLS 1.2 conserva cifrado seguro y mejora compatibilidad.
-        tls_context = ssl.create_default_context()
-        tls_context.minimum_version = ssl.TLSVersion.TLSv1_2
-        tls_context.maximum_version = ssl.TLSVersion.TLSv1_2
-        opener = build_opener(HTTPCookieProcessor(cookies), HTTPSHandler(context=tls_context))
-        prepare_fusionsolar_session(opener, base_url)
-        login, login_headers = fusionsolar_post(
-            opener, f"{base_url}/thirdData/login", {"userName": username, "systemCode": system_code}
-        )
-        if not isinstance(login, dict) or not login.get("success"):
-            raise FusionSolarError("FusionSolar no aceptó la cuenta API. Revisa usuario, contraseña, vigencia y permisos.")
-        token = login_headers.get("XSRF-TOKEN")
-        if not token:
-            token = next((cookie.value for cookie in cookies if cookie.name.upper() == "XSRF-TOKEN"), None)
-        if not token:
-            raise FusionSolarError("FusionSolar no entregó una sesión válida. Revisa que las Interfaces API básicas sigan activas.")
-
+        base_url, opener, token = fusionsolar_authenticated_client()
         response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
         if not isinstance(response, dict) or not response.get("success"):
             raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
-        raw_data = response.get("data")
-        if isinstance(raw_data, dict):
-            for key in ("list", "stations", "stationList"):
-                if isinstance(raw_data.get(key), list):
-                    raw_data = raw_data[key]
-                    break
-        if not isinstance(raw_data, list):
-            raw_data = []
-        plants = []
-        for item in raw_data:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("stationName") or item.get("name")
-            code = item.get("stationCode") or item.get("code")
-            capacity = item.get("capacity")
-            if isinstance(name, str) and name.strip():
-                plants.append({
-                    "name": name.strip(),
-                    "code": str(code) if code is not None else "",
-                    "capacity": capacity if isinstance(capacity, (int, float)) else None,
-                })
+        plants = station_list(response)
         FUSIONSOLAR_CACHE["plants"] = plants
         FUSIONSOLAR_CACHE["expires"] = now + FUSIONSOLAR_CACHE_SECONDS
         return plants
+
+
+def metric_value(item: dict, *keys: str):
+    sources = (item, item.get("dataItemMap", {}))
+    for source in sources:
+        if isinstance(source, dict):
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, (int, float)):
+                    return value
+    return None
+
+
+def fusionsolar_overview() -> list[dict]:
+    """Consulta KPI actuales de planta; no invoca control, escritura ni configuración."""
+    now = time.time()
+    with FUSIONSOLAR_LOCK:
+        cached = FUSIONSOLAR_CACHE.get("overview")
+        if cached is not None and now < float(FUSIONSOLAR_CACHE["overviewExpires"]):
+            return cached
+        base_url, opener, token = fusionsolar_authenticated_client()
+        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
+        if not isinstance(stations_response, dict) or not stations_response.get("success"):
+            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
+        plants = station_list(stations_response)
+        codes = [plant["code"] for plant in plants if plant["code"]]
+        if not codes:
+            return plants
+        kpi_response, _ = fusionsolar_post(
+            opener, f"{base_url}/thirdData/getStationRealKpi", {"stationCodes": ",".join(codes)}, token
+        )
+        if not isinstance(kpi_response, dict) or not kpi_response.get("success"):
+            raise FusionSolarError("La conexión funcionó, pero FusionSolar no entregó los indicadores en tiempo real.")
+        raw_kpis = kpi_response.get("data")
+        if isinstance(raw_kpis, dict):
+            raw_kpis = raw_kpis.get("list") or raw_kpis.get("stations") or raw_kpis.get("data") or raw_kpis
+        if isinstance(raw_kpis, dict):
+            raw_kpis = [dict(value, stationCode=key) for key, value in raw_kpis.items() if isinstance(value, dict)]
+        if not isinstance(raw_kpis, list):
+            raw_kpis = []
+        kpis_by_code = {str(item.get("stationCode") or item.get("code")): item for item in raw_kpis if isinstance(item, dict)}
+        health_names = {1: "Desconectada", 2: "Con alerta", 3: "Normal"}
+        overview = []
+        for plant in plants:
+            kpi = kpis_by_code.get(plant["code"], {})
+            health = metric_value(kpi, "real_health_state", "realHealthState")
+            overview.append({
+                **plant,
+                "activePower": metric_value(kpi, "active_power", "activePower"),
+                "dayGeneration": metric_value(kpi, "day_power", "dayPower"),
+                "monthGeneration": metric_value(kpi, "month_power", "monthPower"),
+                "totalGeneration": metric_value(kpi, "total_power", "totalPower"),
+                "health": health_names.get(health, "Sin estado reportado"),
+            })
+        FUSIONSOLAR_CACHE["plants"] = plants
+        FUSIONSOLAR_CACHE["expires"] = now + FUSIONSOLAR_CACHE_SECONDS
+        FUSIONSOLAR_CACHE["overview"] = overview
+        FUSIONSOLAR_CACHE["overviewExpires"] = now + 60
+        return overview
 
 
 def auth_required() -> bool:
@@ -671,6 +732,15 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 plants = fusionsolar_plants()
                 self.send_json({"provider": "FusionSolar", "plants": plants, "cachedForSeconds": FUSIONSOLAR_CACHE_SECONDS})
+            except FusionSolarError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        if route == "/api/fusionsolar/overview":
+            if not self.require_auth({"admin"}):
+                return
+            try:
+                plants = fusionsolar_overview()
+                self.send_json({"provider": "FusionSolar", "plants": plants, "cachedForSeconds": 60})
             except FusionSolarError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
