@@ -50,6 +50,7 @@ LOGIN_LOCK = threading.Lock()
 FUSIONSOLAR_CACHE_SECONDS = 5 * 60
 FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None}
 FUSIONSOLAR_LOCK = threading.Lock()
+FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
 
 
 class FusionSolarError(Exception):
@@ -69,7 +70,7 @@ def fusionsolar_configuration() -> tuple[str, str, str]:
 
 
 def fusionsolar_post(opener, url: str, payload: dict, token: str | None = None):
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": FUSIONSOLAR_USER_AGENT}
     if token:
         headers["XSRF-TOKEN"] = token
     request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
@@ -87,8 +88,26 @@ def fusionsolar_post(opener, url: str, payload: dict, token: str | None = None):
         if error.code == 407:
             raise FusionSolarError("FusionSolar limitó temporalmente las consultas. Espera unos minutos e intenta de nuevo.")
         raise FusionSolarError("FusionSolar no pudo completar la consulta en este momento.")
-    except (URLError, TimeoutError, OSError):
+    except URLError as error:
+        reason = str(error.reason).lower()
+        if "certificate" in reason or "ssl" in reason:
+            raise FusionSolarError("No se pudo establecer una conexión TLS válida con FusionSolar. Intenta de nuevo o revisa la región configurada.")
+        if "timed out" in reason or "timeout" in reason:
+            raise FusionSolarError("FusionSolar tardó demasiado en responder. Intenta de nuevo en unos minutos.")
+        raise FusionSolarError("FusionSolar cerró la conexión. Verifica que la cuenta API esté activa y que se use la región correcta.")
+    except (TimeoutError, OSError):
         raise FusionSolarError("No fue posible comunicarse con FusionSolar. Verifica la conexión e intenta nuevamente.")
+
+
+def prepare_fusionsolar_session(opener, base_url: str) -> None:
+    """Recoge las cookies públicas del portal antes del inicio de sesión de API."""
+    request = Request(base_url + "/", headers={"User-Agent": FUSIONSOLAR_USER_AGENT, "Accept": "text/html"})
+    try:
+        with opener.open(request, timeout=12):
+            pass
+    except (HTTPError, URLError, TimeoutError, OSError):
+        # El login de API sigue siendo la comprobación definitiva y entrega un error seguro.
+        pass
 
 
 def fusionsolar_plants() -> list[dict]:
@@ -102,6 +121,7 @@ def fusionsolar_plants() -> list[dict]:
         base_url, username, system_code = fusionsolar_configuration()
         cookies = CookieJar()
         opener = build_opener(HTTPCookieProcessor(cookies))
+        prepare_fusionsolar_session(opener, base_url)
         login, login_headers = fusionsolar_post(
             opener, f"{base_url}/thirdData/login", {"userName": username, "systemCode": system_code}
         )
