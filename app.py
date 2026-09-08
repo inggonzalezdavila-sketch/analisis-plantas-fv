@@ -284,13 +284,19 @@ def fusionsolar_daily_report(report_date: date) -> dict:
             points = sorted(records_by_code[plant["code"]], key=lambda point: point["time"])
             generation_values = [point["generation"] for point in points if point["generation"] is not None]
             grid_values = [point["grid"] for point in points if point["grid"] is not None]
+            peak_point = max(
+                (point for point in points if point["generation"] is not None),
+                key=lambda point: point["generation"],
+                default=None,
+            )
             report_plants.append({
                 "name": plant["name"],
                 "points": points,
                 "intervals": len(points),
                 "generation": round(sum(generation_values), 3) if generation_values else None,
                 "grid": round(sum(grid_values), 3) if grid_values else None,
-                "peak": round(max(generation_values), 3) if generation_values else None,
+                "peak": round(peak_point["generation"], 3) if peak_point else None,
+                "peakTime": peak_point["time"] if peak_point else None,
             })
         result = {"date": cache_key, "plants": report_plants}
         FUSIONSOLAR_CACHE["reports"][cache_key] = {"expires": now + FUSIONSOLAR_CACHE_SECONDS, "data": result}
