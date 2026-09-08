@@ -33,3 +33,17 @@ La aplicación se puede publicar como servicio web con Render y un repositorio p
 4. Tras el primer despliegue, Render entregará una URL pública `https://...onrender.com`.
 
 El almacenamiento de archivos de un plan básico puede ser temporal. Para operación real, agregue inicio de sesión y almacenamiento persistente antes de cargar reportes de clientes o de producción.
+
+## Seguridad y usuarios
+
+En Render, la autenticación está activada por defecto. Antes del primer despliegue protegido, cree estas variables en **Environment** como secretos; no las escriba en GitHub ni las comparta:
+
+- `AUTH_REQUIRED`: `true`
+- `APP_SESSION_SECRET`: una cadena aleatoria larga (mínimo 32 caracteres).
+- `APP_USERS_JSON`: usuarios y roles permitidos. Ejemplo de estructura, sustituyendo los valores de ejemplo por contraseñas propias:
+
+```json
+{"admin":{"password":"cambia-esta-contraseña-larga","role":"admin"},"tecnico":{"password":"otra-contraseña-larga","role":"technician"}}
+```
+
+Roles disponibles: `admin` puede consultar, cargar y limpiar datos; `technician` puede consultar y cargar; `viewer` solo puede consultar. Cambiar `APP_SESSION_SECRET` cierra todas las sesiones activas. La integración futura con fabricantes deberá usar credenciales de API de solo lectura almacenadas también como secretos de Render.

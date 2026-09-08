@@ -5,19 +5,25 @@ Abrir: http://127.0.0.1:8000
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import uuid
 import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -32,6 +38,41 @@ DATA_DIR.mkdir(exist_ok=True)
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 DATA_LOCK = threading.RLock()
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "50")) * 1024 * 1024
+SESSION_COOKIE = "fv_session"
+SESSION_TTL_SECONDS = 12 * 60 * 60
+LOGIN_WINDOW_SECONDS = 15 * 60
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
+LOGIN_LOCK = threading.Lock()
+
+
+def auth_required() -> bool:
+    """En Render se protege por defecto; localmente puede iniciarse sin usuarios."""
+    default = "true" if os.environ.get("PORT") else "false"
+    return os.environ.get("AUTH_REQUIRED", default).lower() in {"1", "true", "yes"}
+
+
+def configured_users() -> dict[str, dict[str, str]]:
+    """Usuarios declarados únicamente como secreto APP_USERS_JSON en Render."""
+    try:
+        raw_users = json.loads(os.environ.get("APP_USERS_JSON", "{}"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw_users, dict):
+        return {}
+    users = {}
+    for username, details in raw_users.items():
+        if not isinstance(username, str) or not isinstance(details, dict):
+            continue
+        password = details.get("password")
+        role = details.get("role", "viewer")
+        if isinstance(password, str) and role in {"admin", "technician", "viewer"}:
+            users[username] = {"password": password, "role": role}
+    return users
+
+
+def auth_is_configured() -> bool:
+    return bool(os.environ.get("APP_SESSION_SECRET")) and bool(configured_users())
 
 
 def column_index(cell_reference: str) -> int:
@@ -330,9 +371,162 @@ def available_files() -> list[Path]:
     return sorted(DATA_DIR.glob("*.xlsx"), key=lambda item: item.stat().st_mtime, reverse=True)
 
 
+def encode_session(username: str, role: str) -> str:
+    payload = json.dumps({"user": username, "role": role, "expires": int(time.time()) + SESSION_TTL_SECONDS}, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    secret = os.environ["APP_SESSION_SECRET"].encode("utf-8")
+    signature = hmac.new(secret, encoded, hashlib.sha256).hexdigest().encode("ascii")
+    return (encoded + b"." + signature).decode("ascii")
+
+
+def decode_session(token: str | None) -> dict[str, str] | None:
+    if not token or not auth_is_configured() or "." not in token:
+        return None
+    encoded, supplied_signature = token.encode("ascii", "ignore").rsplit(b".", 1)
+    secret = os.environ["APP_SESSION_SECRET"].encode("utf-8")
+    expected_signature = hmac.new(secret, encoded, hashlib.sha256).hexdigest().encode("ascii")
+    if not hmac.compare_digest(supplied_signature, expected_signature):
+        return None
+    try:
+        padding = b"=" * (-len(encoded) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(encoded + padding))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    username, role, expires = payload.get("user"), payload.get("role"), payload.get("expires")
+    if not isinstance(username, str) or role not in {"admin", "technician", "viewer"} or not isinstance(expires, int) or expires <= time.time():
+        return None
+    # Revoca la sesión si el usuario fue retirado o su rol cambió en Render.
+    user = configured_users().get(username)
+    if not user or user["role"] != role:
+        return None
+    return {"username": username, "role": role}
+
+
+def login_allowed(client: str) -> bool:
+    now = time.time()
+    with LOGIN_LOCK:
+        attempts = [attempt for attempt in LOGIN_ATTEMPTS[client] if now - attempt < LOGIN_WINDOW_SECONDS]
+        LOGIN_ATTEMPTS[client] = attempts
+        return len(attempts) < MAX_LOGIN_ATTEMPTS
+
+
+def record_failed_login(client: str) -> None:
+    with LOGIN_LOCK:
+        LOGIN_ATTEMPTS[client].append(time.time())
+
+
 class Handler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Cache-Control", "no-store")
+        if os.environ.get("PORT"):
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        super().end_headers()
+
+    def client_identifier(self) -> str:
+        forwarded = self.headers.get("X-Forwarded-For", "")
+        return forwarded.split(",")[0].strip() or self.client_address[0]
+
+    def current_user(self) -> dict[str, str] | None:
+        if not auth_required():
+            return {"username": "local", "role": "admin"}
+        cookies = SimpleCookie()
+        cookies.load(self.headers.get("Cookie", ""))
+        session = cookies.get(SESSION_COOKIE)
+        return decode_session(session.value if session else None)
+
+    def send_login_redirect(self) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", "/login")
+        self.end_headers()
+
+    def send_setup_required(self, api: bool) -> None:
+        message = "La aplicación está protegida pero aún requiere la configuración segura de usuarios en Render."
+        if api:
+            self.send_json({"error": message}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        payload = f"<!doctype html><html lang='es'><meta charset='utf-8'><title>Configuración requerida</title><body><h1>Configuración de seguridad requerida</h1><p>{message}</p></body></html>".encode("utf-8")
+        self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def require_auth(self, allowed_roles: set[str] | None = None) -> dict[str, str] | None:
+        is_api = urlparse(self.path).path.startswith("/api/")
+        if auth_required() and not auth_is_configured():
+            self.send_setup_required(is_api)
+            return None
+        user = self.current_user()
+        if not user:
+            if is_api:
+                self.send_json({"error": "Inicia sesión para continuar."}, HTTPStatus.UNAUTHORIZED)
+            else:
+                self.send_login_redirect()
+            return None
+        if allowed_roles and user["role"] not in allowed_roles:
+            self.send_json({"error": "Tu rol no tiene permiso para esta acción."}, HTTPStatus.FORBIDDEN)
+            return None
+        return user
+
+    def session_cookie(self, token: str, max_age: int) -> str:
+        secure = "; Secure" if os.environ.get("PORT") else ""
+        return f"{SESSION_COOKIE}={token}; Max-Age={max_age}; Path=/; HttpOnly; SameSite=Strict{secure}"
+
+    def handle_login(self) -> None:
+        if not auth_required():
+            self.send_json({"user": {"username": "local", "role": "admin"}})
+            return
+        if not auth_is_configured():
+            self.send_setup_required(True)
+            return
+        client = self.client_identifier()
+        if not login_allowed(client):
+            self.send_json({"error": "Demasiados intentos. Intenta nuevamente en 15 minutos."}, HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < content_length <= 8192:
+                raise ValueError
+            credentials = json.loads(self.rfile.read(content_length))
+            username = credentials.get("username", "")
+            password = credentials.get("password", "")
+        except (ValueError, json.JSONDecodeError):
+            self.send_json({"error": "Solicitud de inicio de sesión inválida."}, HTTPStatus.BAD_REQUEST)
+            return
+        user = configured_users().get(username) if isinstance(username, str) else None
+        if not user or not isinstance(password, str) or not hmac.compare_digest(password, user["password"]):
+            record_failed_login(client)
+            self.send_json({"error": "Usuario o contraseña incorrectos."}, HTTPStatus.UNAUTHORIZED)
+            return
+        with LOGIN_LOCK:
+            LOGIN_ATTEMPTS.pop(client, None)
+        token = encode_session(username, user["role"])
+        self.send_json({"user": {"username": username, "role": user["role"]}}, HTTPStatus.OK, [self.session_cookie(token, SESSION_TTL_SECONDS)])
+
     def do_GET(self):
         route = urlparse(self.path).path
+        if route in {"/login", "/static/login.css", "/static/login.js"}:
+            if route == "/login":
+                if auth_required() and not auth_is_configured():
+                    self.send_setup_required(False)
+                    return
+                if self.current_user() and auth_required():
+                    self.send_response(HTTPStatus.SEE_OTHER)
+                    self.send_header("Location", "/")
+                    self.end_headers()
+                    return
+                self.path = "/static/login.html"
+            return super().do_GET()
+        if route == "/api/me":
+            user = self.require_auth()
+            if user:
+                self.send_json({"user": user})
+            return
+        if not self.require_auth():
+            return
         if route == "/api/dashboard":
             # No analizar un listado mientras otra petición está sustituyendo los archivos.
             with DATA_LOCK:
@@ -354,8 +548,18 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/upload":
+        route = urlparse(self.path).path
+        if route == "/api/login":
+            self.handle_login()
+            return
+        if route == "/api/logout":
+            if self.require_auth():
+                self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
+            return
+        if route != "/api/upload":
             self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        if not self.require_auth({"admin", "technician"}):
             return
         content_type = self.headers.get("Content-Type", "")
         if "multipart/form-data" not in content_type:
@@ -412,6 +616,8 @@ class Handler(SimpleHTTPRequestHandler):
         if urlparse(self.path).path != "/api/data":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        if not self.require_auth({"admin"}):
+            return
         with DATA_LOCK:
             deleted = 0
             for previous_file in DATA_DIR.glob("*.xlsx"):
@@ -419,11 +625,13 @@ class Handler(SimpleHTTPRequestHandler):
                 deleted += 1
         self.send_json({"message": "Datos eliminados", "deleted": deleted})
 
-    def send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK):
+    def send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK, cookies: list[str] | None = None):
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
+        for cookie in cookies or []:
+            self.send_header("Set-Cookie", cookie)
         self.end_headers()
         self.wfile.write(payload)
 
