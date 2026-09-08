@@ -236,12 +236,23 @@ def report_records(response: dict) -> list[dict]:
     return [item for item in raw_data if isinstance(item, dict)] if isinstance(raw_data, list) else []
 
 
-def fusionsolar_daily_report(report_date: date) -> dict:
+def selected_fusionsolar_plants(plants: list[dict], selected_codes: list[str] | None) -> list[dict]:
+    """Limita la consulta a plantas que la cuenta API ya tiene autorizadas."""
+    if not selected_codes:
+        return plants
+    requested = set(selected_codes)
+    available = {plant["code"] for plant in plants if plant["code"]}
+    if not requested <= available:
+        raise FusionSolarError("Una de las plantas seleccionadas ya no está autorizada para esta cuenta API.")
+    return [plant for plant in plants if plant["code"] in requested]
+
+
+def fusionsolar_daily_report(report_date: date, selected_codes: list[str] | None = None) -> dict:
     """Obtiene KPI horarios de una fecha, sin pedir datos de control de equipos."""
     today_colombia = datetime.now(timezone(timedelta(hours=-5))).date()
     if report_date > today_colombia:
         raise FusionSolarError("Selecciona una fecha de hoy o anterior.")
-    cache_key = report_date.isoformat()
+    cache_key = f"hour:{report_date.isoformat()}:{','.join(sorted(selected_codes or []))}"
     now = time.time()
     with FUSIONSOLAR_LOCK:
         cached = FUSIONSOLAR_CACHE["reports"].get(cache_key)
@@ -251,7 +262,7 @@ def fusionsolar_daily_report(report_date: date) -> dict:
         stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
         if not isinstance(stations_response, dict) or not stations_response.get("success"):
             raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
-        plants = station_list(stations_response)
+        plants = selected_fusionsolar_plants(station_list(stations_response), selected_codes)
         codes = [plant["code"] for plant in plants if plant["code"]]
         if not codes:
             return {"date": cache_key, "plants": []}
@@ -298,7 +309,89 @@ def fusionsolar_daily_report(report_date: date) -> dict:
                 "peak": round(peak_point["generation"], 3) if peak_point else None,
                 "peakTime": peak_point["time"] if peak_point else None,
             })
-        result = {"date": cache_key, "plants": report_plants}
+        result = {"date": report_date.isoformat(), "plants": report_plants}
+        FUSIONSOLAR_CACHE["reports"][cache_key] = {"expires": now + FUSIONSOLAR_CACHE_SECONDS, "data": result}
+        return result
+
+
+def month_start(value: date) -> date:
+    return value.replace(day=1)
+
+
+def next_month(value: date) -> date:
+    return date(value.year + (value.month == 12), 1 if value.month == 12 else value.month + 1, 1)
+
+
+def fusionsolar_range_report(start_date: date, end_date: date, selected_codes: list[str] | None = None) -> dict:
+    """Obtiene producción diaria para un rango corto, usando solo consultas de lectura."""
+    today_colombia = datetime.now(timezone(timedelta(hours=-5))).date()
+    if start_date > end_date:
+        raise FusionSolarError("La fecha inicial debe ser anterior o igual a la fecha final.")
+    if end_date > today_colombia:
+        raise FusionSolarError("Selecciona fechas de hoy o anteriores.")
+    if (end_date - start_date).days + 1 > 31:
+        raise FusionSolarError("El rango máximo es de 31 días para mantener el detalle diario y respetar FusionSolar.")
+    cache_key = f"range:{start_date.isoformat()}:{end_date.isoformat()}:{','.join(sorted(selected_codes or []))}"
+    now = time.time()
+    with FUSIONSOLAR_LOCK:
+        cached = FUSIONSOLAR_CACHE["reports"].get(cache_key)
+        if cached and now < cached["expires"]:
+            return cached["data"]
+        base_url, opener, token = fusionsolar_authenticated_client()
+        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
+        if not isinstance(stations_response, dict) or not stations_response.get("success"):
+            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
+        plants = selected_fusionsolar_plants(station_list(stations_response), selected_codes)
+        codes = [plant["code"] for plant in plants if plant["code"]]
+        if not codes:
+            return {"startDate": start_date.isoformat(), "endDate": end_date.isoformat(), "plants": []}
+        records_by_code: dict[str, list[dict]] = defaultdict(list)
+        colombia = timezone(timedelta(hours=-5))
+        cursor = month_start(start_date)
+        while cursor <= end_date:
+            collect_time = datetime.combine(cursor, datetime.min.time(), tzinfo=colombia)
+            response, _ = fusionsolar_post(
+                opener,
+                f"{base_url}/thirdData/getKpiStationDay",
+                {"stationCodes": ",".join(codes), "collectTime": int(collect_time.timestamp() * 1000)},
+                token,
+            )
+            if not isinstance(response, dict) or not response.get("success"):
+                raise FusionSolarError("FusionSolar no entregó producción diaria para el rango solicitado.")
+            for item in report_records(response):
+                code = str(item.get("stationCode") or item.get("code") or "")
+                timestamp = item.get("collectTime")
+                if not isinstance(timestamp, (int, float)):
+                    continue
+                when = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).astimezone(colombia).date()
+                if not start_date <= when <= end_date:
+                    continue
+                records_by_code[code].append({
+                    "date": when.isoformat(),
+                    "generation": metric_value(item, "inverter_power", "inverterPower", "pv_power", "pvPower"),
+                    "grid": metric_value(item, "ongrid_power", "ongridPower"),
+                })
+            cursor = next_month(cursor)
+        report_plants = []
+        for plant in plants:
+            points = sorted(records_by_code[plant["code"]], key=lambda point: point["date"])
+            generation_values = [point["generation"] for point in points if point["generation"] is not None]
+            grid_values = [point["grid"] for point in points if point["grid"] is not None]
+            peak_point = max(
+                (point for point in points if point["generation"] is not None),
+                key=lambda point: point["generation"],
+                default=None,
+            )
+            report_plants.append({
+                "name": plant["name"],
+                "days": len(points),
+                "points": points,
+                "generation": round(sum(generation_values), 3) if generation_values else None,
+                "grid": round(sum(grid_values), 3) if grid_values else None,
+                "peak": round(peak_point["generation"], 3) if peak_point else None,
+                "peakDate": peak_point["date"] if peak_point else None,
+            })
+        result = {"startDate": start_date.isoformat(), "endDate": end_date.isoformat(), "plants": report_plants}
         FUSIONSOLAR_CACHE["reports"][cache_key] = {"expires": now + FUSIONSOLAR_CACHE_SECONDS, "data": result}
         return result
 
@@ -821,14 +914,32 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/fusionsolar/daily-report":
             if not self.require_auth({"admin"}):
                 return
-            selected_date = parse_qs(urlparse(self.path).query).get("date", [""])[0]
+            query = parse_qs(urlparse(self.path).query)
+            selected_date = query.get("date", [""])[0]
+            selected_codes = [code for code in query.get("plants", [""])[0].split(",") if code]
             try:
                 report_date = date.fromisoformat(selected_date)
             except ValueError:
                 self.send_json({"error": "Selecciona una fecha válida para el reporte."}, HTTPStatus.BAD_REQUEST)
                 return
             try:
-                self.send_json(fusionsolar_daily_report(report_date))
+                self.send_json(fusionsolar_daily_report(report_date, selected_codes))
+            except FusionSolarError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        if route == "/api/fusionsolar/range-report":
+            if not self.require_auth({"admin"}):
+                return
+            query = parse_qs(urlparse(self.path).query)
+            selected_codes = [code for code in query.get("plants", [""])[0].split(",") if code]
+            try:
+                start_date = date.fromisoformat(query.get("start", [""])[0])
+                end_date = date.fromisoformat(query.get("end", [""])[0])
+            except ValueError:
+                self.send_json({"error": "Selecciona fechas válidas para el reporte de rango."}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                self.send_json(fusionsolar_range_report(start_date, end_date, selected_codes))
             except FusionSolarError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
