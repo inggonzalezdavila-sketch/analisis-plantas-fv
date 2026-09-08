@@ -23,12 +23,15 @@ import zipfile
 from collections import Counter, defaultdict
 from datetime import datetime
 from http import HTTPStatus
+from http.cookiejar import CookieJar
 from http.cookies import SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
@@ -44,6 +47,99 @@ LOGIN_WINDOW_SECONDS = 15 * 60
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
 LOGIN_LOCK = threading.Lock()
+FUSIONSOLAR_CACHE_SECONDS = 5 * 60
+FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None}
+FUSIONSOLAR_LOCK = threading.Lock()
+
+
+class FusionSolarError(Exception):
+    """Error seguro: nunca devuelve credenciales, tokens ni respuestas externas."""
+
+
+def fusionsolar_configuration() -> tuple[str, str, str]:
+    """Obtiene la configuración exclusivamente desde secretos del servidor."""
+    base_url = os.environ.get("FUSIONSOLAR_BASE_URL", "").rstrip("/")
+    username = os.environ.get("FUSIONSOLAR_USERNAME", "")
+    system_code = os.environ.get("FUSIONSOLAR_SYSTEM_CODE", "")
+    parsed = urlparse(base_url)
+    trusted_host = parsed.hostname and parsed.hostname.endswith(".fusionsolar.huawei.com")
+    if parsed.scheme != "https" or not trusted_host or not username or not system_code:
+        raise FusionSolarError("La conexión FusionSolar aún no está configurada de forma segura en Render.")
+    return base_url, username, system_code
+
+
+def fusionsolar_post(opener, url: str, payload: dict, token: str | None = None):
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token:
+        headers["XSRF-TOKEN"] = token
+    request = Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with opener.open(request, timeout=12) as response:
+            raw = response.read(1_000_000)
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise FusionSolarError("FusionSolar devolvió una respuesta no reconocida. Intenta nuevamente.")
+            return body, response.headers
+    except HTTPError as error:
+        if error.code in {401, 402, 403}:
+            raise FusionSolarError("FusionSolar rechazó el acceso. Verifica que la cuenta API esté activa y autorizada para las plantas.")
+        if error.code == 407:
+            raise FusionSolarError("FusionSolar limitó temporalmente las consultas. Espera unos minutos e intenta de nuevo.")
+        raise FusionSolarError("FusionSolar no pudo completar la consulta en este momento.")
+    except (URLError, TimeoutError, OSError):
+        raise FusionSolarError("No fue posible comunicarse con FusionSolar. Verifica la conexión e intenta nuevamente.")
+
+
+def fusionsolar_plants() -> list[dict]:
+    """Lista plantas autorizadas con la API básica, sin llamadas de control."""
+    now = time.time()
+    with FUSIONSOLAR_LOCK:
+        cached = FUSIONSOLAR_CACHE.get("plants")
+        if cached is not None and now < float(FUSIONSOLAR_CACHE["expires"]):
+            return cached
+
+        base_url, username, system_code = fusionsolar_configuration()
+        cookies = CookieJar()
+        opener = build_opener(HTTPCookieProcessor(cookies))
+        login, login_headers = fusionsolar_post(
+            opener, f"{base_url}/thirdData/login", {"userName": username, "systemCode": system_code}
+        )
+        if not isinstance(login, dict) or not login.get("success"):
+            raise FusionSolarError("FusionSolar no aceptó la cuenta API. Revisa usuario, contraseña, vigencia y permisos.")
+        token = login_headers.get("XSRF-TOKEN")
+        if not token:
+            token = next((cookie.value for cookie in cookies if cookie.name.upper() == "XSRF-TOKEN"), None)
+        if not token:
+            raise FusionSolarError("FusionSolar no entregó una sesión válida. Revisa que las Interfaces API básicas sigan activas.")
+
+        response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
+        if not isinstance(response, dict) or not response.get("success"):
+            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
+        raw_data = response.get("data")
+        if isinstance(raw_data, dict):
+            for key in ("list", "stations", "stationList"):
+                if isinstance(raw_data.get(key), list):
+                    raw_data = raw_data[key]
+                    break
+        if not isinstance(raw_data, list):
+            raw_data = []
+        plants = []
+        for item in raw_data:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("stationName") or item.get("name")
+            code = item.get("stationCode") or item.get("code")
+            capacity = item.get("capacity")
+            if isinstance(name, str) and name.strip():
+                plants.append({
+                    "name": name.strip(),
+                    "code": str(code) if code is not None else "",
+                    "capacity": capacity if isinstance(capacity, (int, float)) else None,
+                })
+        FUSIONSOLAR_CACHE["plants"] = plants
+        FUSIONSOLAR_CACHE["expires"] = now + FUSIONSOLAR_CACHE_SECONDS
+        return plants
 
 
 def auth_required() -> bool:
@@ -542,6 +638,15 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(result)
                 except Exception as error:
                     self.send_json({"error": f"No se pudieron analizar los archivos: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if route == "/api/fusionsolar/plants":
+            if not self.require_auth({"admin"}):
+                return
+            try:
+                plants = fusionsolar_plants()
+                self.send_json({"provider": "FusionSolar", "plants": plants, "cachedForSeconds": FUSIONSOLAR_CACHE_SECONDS})
+            except FusionSolarError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
         if route == "/":
             self.path = "/static/index.html"

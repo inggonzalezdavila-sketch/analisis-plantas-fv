@@ -47,3 +47,7 @@ En Render, la autenticación está activada por defecto. Antes del primer despli
 ```
 
 Roles disponibles: `admin` puede consultar, cargar y limpiar datos; `technician` puede consultar y cargar; `viewer` solo puede consultar. Cambiar `APP_SESSION_SECRET` cierra todas las sesiones activas. La integración futura con fabricantes deberá usar credenciales de API de solo lectura almacenadas también como secretos de Render.
+
+## Conexión FusionSolar de solo lectura
+
+Para conectar FusionSolar, cree una cuenta **northbound API** separada, limitada a las plantas necesarias y con solo **Interfaces API básicas**. En Render agregue como variables de entorno secretas `FUSIONSOLAR_BASE_URL`, `FUSIONSOLAR_USERNAME` y `FUSIONSOLAR_SYSTEM_CODE`. La aplicación nunca envía estas claves al navegador ni las registra en los logs. Por ahora, la conexión solo lista las plantas autorizadas: no consulta ni ofrece APIs de control, configuración o escritura. El listado se conserva en memoria durante cinco minutos para reducir inicios de sesión y llamadas al fabricante.
