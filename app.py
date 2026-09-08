@@ -178,6 +178,8 @@ def metric_value(item: dict, *keys: str):
                 value = source.get(key)
                 if isinstance(value, (int, float)):
                     return value
+                if isinstance(value, str) and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value.strip()):
+                    return float(value)
     return None
 
 
@@ -216,7 +218,11 @@ def fusionsolar_overview() -> list[dict]:
             health = metric_value(kpi, "real_health_state", "realHealthState")
             overview.append({
                 **plant,
-                "activePower": metric_value(kpi, "active_power", "activePower"),
+                "activePower": metric_value(
+                    kpi,
+                    "active_power", "activePower", "inverter_power", "inverterPower",
+                    "pv_power", "pvPower", "output_power", "outputPower", "power",
+                ),
                 "dayGeneration": metric_value(kpi, "day_power", "dayPower"),
                 "monthGeneration": metric_value(kpi, "month_power", "monthPower"),
                 "totalGeneration": metric_value(kpi, "total_power", "totalPower"),
