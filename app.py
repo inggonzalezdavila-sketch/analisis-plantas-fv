@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 import zipfile
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookiejar import CookieJar
 from http.cookies import SimpleCookie
@@ -31,7 +31,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 from xml.etree import ElementTree as ET
 
@@ -49,7 +49,7 @@ MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
 LOGIN_LOCK = threading.Lock()
 FUSIONSOLAR_CACHE_SECONDS = 5 * 60
-FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None}
+FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None, "reports": {}}
 FUSIONSOLAR_LOCK = threading.Lock()
 FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
 
@@ -227,6 +227,74 @@ def fusionsolar_overview() -> list[dict]:
         FUSIONSOLAR_CACHE["overview"] = overview
         FUSIONSOLAR_CACHE["overviewExpires"] = now + 60
         return overview
+
+
+def report_records(response: dict) -> list[dict]:
+    raw_data = response.get("data")
+    if isinstance(raw_data, dict):
+        raw_data = raw_data.get("list") or raw_data.get("data") or []
+    return [item for item in raw_data if isinstance(item, dict)] if isinstance(raw_data, list) else []
+
+
+def fusionsolar_daily_report(report_date: date) -> dict:
+    """Obtiene KPI horarios de una fecha, sin pedir datos de control de equipos."""
+    today_colombia = datetime.now(timezone(timedelta(hours=-5))).date()
+    if report_date > today_colombia:
+        raise FusionSolarError("Selecciona una fecha de hoy o anterior.")
+    cache_key = report_date.isoformat()
+    now = time.time()
+    with FUSIONSOLAR_LOCK:
+        cached = FUSIONSOLAR_CACHE["reports"].get(cache_key)
+        if cached and now < cached["expires"]:
+            return cached["data"]
+        base_url, opener, token = fusionsolar_authenticated_client()
+        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
+        if not isinstance(stations_response, dict) or not stations_response.get("success"):
+            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
+        plants = station_list(stations_response)
+        codes = [plant["code"] for plant in plants if plant["code"]]
+        if not codes:
+            return {"date": cache_key, "plants": []}
+        colombia_time = datetime.combine(report_date, datetime.min.time(), tzinfo=timezone(timedelta(hours=-5)))
+        response, _ = fusionsolar_post(
+            opener,
+            f"{base_url}/thirdData/getKpiStationHour",
+            {"stationCodes": ",".join(codes), "collectTime": int(colombia_time.timestamp() * 1000)},
+            token,
+        )
+        if not isinstance(response, dict) or not response.get("success"):
+            raise FusionSolarError("FusionSolar no entregó el reporte horario para esa fecha.")
+        records_by_code = defaultdict(list)
+        for item in report_records(response):
+            code = str(item.get("stationCode") or item.get("code") or "")
+            timestamp = item.get("collectTime")
+            if not isinstance(timestamp, (int, float)):
+                continue
+            when = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).astimezone(timezone(timedelta(hours=-5)))
+            if when.date() != report_date:
+                continue
+            records_by_code[code].append({
+                "time": when.strftime("%H:%M"),
+                "generation": metric_value(item, "inverter_power", "inverterPower", "pv_power", "pvPower"),
+                "grid": metric_value(item, "ongrid_power", "ongridPower"),
+                "theoretical": metric_value(item, "theory_power", "theoryPower"),
+            })
+        report_plants = []
+        for plant in plants:
+            points = sorted(records_by_code[plant["code"]], key=lambda point: point["time"])
+            generation_values = [point["generation"] for point in points if point["generation"] is not None]
+            grid_values = [point["grid"] for point in points if point["grid"] is not None]
+            report_plants.append({
+                "name": plant["name"],
+                "points": points,
+                "intervals": len(points),
+                "generation": round(sum(generation_values), 3) if generation_values else None,
+                "grid": round(sum(grid_values), 3) if grid_values else None,
+                "peak": round(max(generation_values), 3) if generation_values else None,
+            })
+        result = {"date": cache_key, "plants": report_plants}
+        FUSIONSOLAR_CACHE["reports"][cache_key] = {"expires": now + FUSIONSOLAR_CACHE_SECONDS, "data": result}
+        return result
 
 
 def auth_required() -> bool:
@@ -741,6 +809,20 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 plants = fusionsolar_overview()
                 self.send_json({"provider": "FusionSolar", "plants": plants, "cachedForSeconds": 60})
+            except FusionSolarError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        if route == "/api/fusionsolar/daily-report":
+            if not self.require_auth({"admin"}):
+                return
+            selected_date = parse_qs(urlparse(self.path).query).get("date", [""])[0]
+            try:
+                report_date = date.fromisoformat(selected_date)
+            except ValueError:
+                self.send_json({"error": "Selecciona una fecha válida para el reporte."}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                self.send_json(fusionsolar_daily_report(report_date))
             except FusionSolarError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
