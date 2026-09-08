@@ -199,7 +199,66 @@ def metric_keys(item: dict) -> list[str]:
         if isinstance(source, dict):
             keys.update(str(key) for key in source if key not in {"stationCode", "code"})
     return sorted(keys)
-    return None
+
+
+def fusionsolar_inverter_power(base_url: str, opener, token: str, plants: list[dict]) -> dict[str, float]:
+    """Suma la potencia activa de inversores cuando el KPI de planta no la incluye."""
+    codes = [plant["code"] for plant in plants if plant["code"]]
+    if not codes:
+        return {}
+    try:
+        devices_response, _ = fusionsolar_post(
+            opener, f"{base_url}/thirdData/getDevList", {"stationCodes": ",".join(codes)}, token
+        )
+        if not isinstance(devices_response, dict) or not devices_response.get("success"):
+            return {}
+        raw_devices = devices_response.get("data")
+        if isinstance(raw_devices, dict):
+            raw_devices = raw_devices.get("list") or raw_devices.get("devices") or raw_devices.get("data") or []
+        if not isinstance(raw_devices, list):
+            return {}
+        device_station: dict[str, str] = {}
+        by_type: dict[int, list[str]] = defaultdict(list)
+        inverter_words = ("inverter", "inversor", "sun2000")
+        for device in raw_devices:
+            if not isinstance(device, dict):
+                continue
+            device_id = device.get("devId") or device.get("deviceId") or device.get("id")
+            raw_device_type = device.get("devTypeId") or device.get("deviceTypeId")
+            try:
+                device_type = int(raw_device_type)
+            except (TypeError, ValueError):
+                continue
+            station_code = str(device.get("stationCode") or device.get("code") or "")
+            label = " ".join(str(device.get(key) or "") for key in ("devName", "deviceName", "name", "model", "devTypeName")).lower()
+            if not device_id or not station_code or not any(word in label for word in inverter_words):
+                continue
+            device_id = str(device_id)
+            device_station[device_id] = station_code
+            by_type[device_type].append(device_id)
+        power_by_station: dict[str, float] = defaultdict(float)
+        for device_type, device_ids in by_type.items():
+            response, _ = fusionsolar_post(
+                opener,
+                f"{base_url}/thirdData/getDevRealKpi",
+                {"devIds": ",".join(device_ids), "devTypeId": device_type},
+                token,
+            )
+            if not isinstance(response, dict) or not response.get("success"):
+                continue
+            for item in report_records(response):
+                device_id = str(item.get("devId") or item.get("deviceId") or item.get("id") or "")
+                station_code = str(item.get("stationCode") or device_station.get(device_id) or "")
+                power = metric_value(
+                    item,
+                    "active_power", "activePower", "active_power_kw", "activePowerKw",
+                    "inverter_power", "inverterPower", "output_power", "outputPower", "power",
+                )
+                if station_code and power is not None:
+                    power_by_station[station_code] += power
+        return {code: round(power, 3) for code, power in power_by_station.items()}
+    except FusionSolarError:
+        return {}
 
 
 def fusionsolar_overview() -> list[dict]:
@@ -231,16 +290,25 @@ def fusionsolar_overview() -> list[dict]:
             raw_kpis = []
         kpis_by_code = {str(item.get("stationCode") or item.get("code")): item for item in raw_kpis if isinstance(item, dict)}
         health_names = {1: "Desconectada", 2: "Con alerta", 3: "Normal"}
-        overview = []
-        for plant in plants:
-            kpi = kpis_by_code.get(plant["code"], {})
-            health = metric_value(kpi, "real_health_state", "realHealthState")
-            active_power = metric_value(
-                kpi,
+        active_power_by_code = {
+            plant["code"]: metric_value(
+                kpis_by_code.get(plant["code"], {}),
                 "active_power", "activePower", "active_power_kw", "activePowerKw",
                 "inverter_power", "inverterPower", "inverter_power_kw", "inverterPowerKw",
                 "pv_power", "pvPower", "pv_power_kw", "pvPowerKw", "output_power", "outputPower", "power",
             )
+            for plant in plants
+        }
+        if any(power is None for power in active_power_by_code.values()):
+            device_power = fusionsolar_inverter_power(base_url, opener, token, plants)
+            for code, power in device_power.items():
+                if active_power_by_code.get(code) is None:
+                    active_power_by_code[code] = power
+        overview = []
+        for plant in plants:
+            kpi = kpis_by_code.get(plant["code"], {})
+            health = metric_value(kpi, "real_health_state", "realHealthState")
+            active_power = active_power_by_code.get(plant["code"])
             overview.append({
                 **plant,
                 "activePower": active_power,
