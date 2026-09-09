@@ -37,8 +37,11 @@ from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
+SIMULATION_DIR = ROOT / "simulation_data"
+SIMULATION_INDEX = SIMULATION_DIR / "sources.json"
 STATIC_DIR = ROOT / "static"
 DATA_DIR.mkdir(exist_ok=True)
+SIMULATION_DIR.mkdir(exist_ok=True)
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 DATA_LOCK = threading.RLock()
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "50")) * 1024 * 1024
@@ -663,6 +666,198 @@ def multipart_uploads(content_type: str, body: bytes) -> list[SimpleNamespace]:
     return uploads
 
 
+MONTH_NAMES = {
+    "enero": 1, "january": 1, "febrero": 2, "february": 2,
+    "marzo": 3, "march": 3, "abril": 4, "april": 4,
+    "mayo": 5, "may": 5, "junio": 6, "june": 6,
+    "julio": 7, "july": 7, "agosto": 8, "august": 8,
+    "septiembre": 9, "september": 9, "octubre": 10, "october": 10,
+    "noviembre": 11, "november": 11, "diciembre": 12, "december": 12,
+}
+
+
+def xlsx_number(value: str) -> float | None:
+    """Los valores XML de XLSX usan punto decimal, sin formato regional."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def xlsx_date(value: str) -> date | None:
+    value = value.strip()
+    for pattern in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value[:10], pattern).date()
+        except ValueError:
+            continue
+    serial = xlsx_number(value)
+    if serial is not None and serial > 20_000:
+        return (datetime(1899, 12, 30) + timedelta(days=serial)).date()
+    return None
+
+
+def workbook_rows(path: Path) -> list[list[dict[int, str]]]:
+    """Lee hojas XLSX en bruto para fuentes de consumo y PVSyst, sin dependencias."""
+    sheets = []
+    with zipfile.ZipFile(path) as book:
+        shared_strings = workbook_shared_strings(book)
+        sheet_paths = [name for name in book.namelist() if name.startswith("xl/worksheets/") and name.endswith(".xml")]
+        for sheet_path in sheet_paths:
+            rows = []
+            with book.open(sheet_path) as sheet:
+                for _, element in ET.iterparse(sheet, events=("end",)):
+                    if element.tag != NS + "row":
+                        continue
+                    rows.append({column_index(cell.get("r")): cell_value(cell, shared_strings) for cell in element.findall(NS + "c")})
+                    element.clear()
+            sheets.append(rows)
+    return sheets
+
+
+def row_month(cells: dict[int, str]) -> int | None:
+    return next((MONTH_NAMES.get(normalise_header(value)) for value in cells.values() if MONTH_NAMES.get(normalise_header(value))), None)
+
+
+def simulation_source(path: Path) -> dict:
+    """Extrae consumo horario y producción PVSyst desde un mismo libro de cálculo."""
+    consumption: dict[date, list[float]] = {}
+    monthly_generation: dict[int, float] = {}
+    hourly_profiles: dict[int, list[float]] = {}
+    hourly_profile_priority: dict[int, int] = {}
+
+    for rows in workbook_rows(path):
+        for row_index, cells in enumerate(rows):
+            headers = {column: normalise_header(value) for column, value in cells.items()}
+            context = " ".join(
+                normalise_header(value)
+                for context_row in rows[max(0, row_index - 2):row_index + 1]
+                for value in context_row.values()
+            )
+            # Evita confundir la carga activa con las pestañas de energía reactiva
+            # que suelen traer las mismas columnas Hora 0 a Hora 23.
+            active_energy_sheet = "kwh" in context and "kvarh" not in context
+            date_column = next((column for column, value in headers.items() if value in {"fechahora", "fecha"}), None)
+            hour_columns = {
+                int(match.group(1)): column
+                for column, value in headers.items()
+                if (match := re.fullmatch(r"hora(\d{1,2})", value)) and int(match.group(1)) < 24
+            }
+            if active_energy_sheet and date_column is not None and len(hour_columns) == 24:
+                for data_row in rows[row_index + 1:]:
+                    day = xlsx_date(data_row.get(date_column, ""))
+                    if not day:
+                        continue
+                    values = [xlsx_number(data_row.get(hour_columns[hour], "")) for hour in range(24)]
+                    if all(value is not None for value in values):
+                        consumption[day] = [float(value) for value in values]
+
+            generation_column = next((column for column, value in headers.items() if value == "egrid"), None)
+            if generation_column is not None:
+                for data_row in rows[row_index + 1:]:
+                    month = row_month(data_row)
+                    generation = xlsx_number(data_row.get(generation_column, ""))
+                    if month and generation is not None and generation > 0:
+                        # PVSyst entrega E_Grid en MWh en este reporte.
+                        monthly_generation[month] = generation * 1000
+
+            profile_columns = {
+                int(match.group(1)): column
+                for column, value in headers.items()
+                if (match := re.fullmatch(r"(\d{1,2})h", value)) and int(match.group(1)) < 24
+            }
+            if len(profile_columns) == 24:
+                profile_priority = 2 if "promediosmensualesporhora" in context else 1 if "sumasmensualesporhora" in context else 0
+                for data_row in rows[row_index + 1:]:
+                    month = row_month(data_row)
+                    values = [xlsx_number(data_row.get(profile_columns[hour], "")) for hour in range(24)]
+                    if month and all(value is not None for value in values) and sum(values) > 0 and profile_priority >= hourly_profile_priority.get(month, -1):
+                        hourly_profiles[month] = [float(value) for value in values]
+                        hourly_profile_priority[month] = profile_priority
+
+    if not consumption:
+        raise ValueError("No se encontró una hoja de consumo activo con Fecha/Hora y las 24 horas.")
+    missing_months = [month for month in range(1, 13) if month not in monthly_generation or month not in hourly_profiles]
+    if missing_months:
+        raise ValueError("No se encontró la simulación PVSyst completa (E_Grid y perfil horario de los 12 meses).")
+    years = {day.year for day in consumption}
+    if len(years) != 1:
+        raise ValueError("El archivo debe contener un único año completo de consumo para esta simulación.")
+    year = years.pop()
+    if len(consumption) < 360:
+        raise ValueError("El consumo horario no cubre un año completo; se requieren al menos 360 días.")
+    return {
+        "file": path.name,
+        "year": year,
+        "consumption": consumption,
+        "monthlyGeneration": monthly_generation,
+        "hourlyProfiles": hourly_profiles,
+    }
+
+
+def easter_sunday(year: int) -> date:
+    """Algoritmo gregoriano de Meeus/Jones/Butcher."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = (h + l - 7 * m + 114) % 31 + 1
+    return date(year, month, day)
+
+
+def next_monday(day: date) -> date:
+    return day + timedelta(days=(7 - day.weekday()) % 7)
+
+
+def colombian_holidays(year: int) -> set[date]:
+    """Festivos nacionales de Colombia, incluidos los traslados de la Ley Emiliani."""
+    easter = easter_sunday(year)
+    moved = [date(year, 1, 6), date(year, 3, 19), easter + timedelta(days=39), easter + timedelta(days=60), easter + timedelta(days=68), date(year, 6, 29), date(year, 8, 15), date(year, 10, 12), date(year, 11, 1), date(year, 11, 11)]
+    fixed = [date(year, 1, 1), easter - timedelta(days=3), easter - timedelta(days=2), date(year, 5, 1), date(year, 7, 20), date(year, 8, 7), date(year, 12, 8), date(year, 12, 25)]
+    return set(fixed + [next_monday(day) for day in moved])
+
+
+def simulation_report(path: Path, availability: float = 100.0) -> dict:
+    source = simulation_source(path)
+    availability = min(max(availability, 0), 100)
+    holidays = colombian_holidays(source["year"])
+    month_results = {month: {"generation": 0.0, "selfConsumption": 0.0, "exported": 0.0, "gridImport": 0.0} for month in range(1, 13)}
+    shutdown_days = 0
+    for day, demand in sorted(source["consumption"].items()):
+        month = day.month
+        profile = source["hourlyProfiles"][month]
+        profile_total = sum(profile)
+        days_in_month = (date(day.year + (month == 12), month % 12 + 1, 1) - date(day.year, month, 1)).days
+        generation = [source["monthlyGeneration"][month] * availability / 100 * value / profile_total / days_in_month for value in profile]
+        non_operating = day.weekday() >= 5 or day in holidays
+        load = [0.0] * 24 if non_operating else demand
+        if non_operating:
+            shutdown_days += 1
+        result = month_results[month]
+        result["generation"] += sum(generation)
+        result["selfConsumption"] += sum(min(production, use) for production, use in zip(generation, load))
+        result["exported"] += sum(max(production - use, 0) for production, use in zip(generation, load))
+        result["gridImport"] += sum(max(use - production, 0) for production, use in zip(generation, load))
+
+    months = []
+    for month, values in month_results.items():
+        months.append({"month": month, "label": date(source["year"], month, 1).strftime("%B").capitalize(), **{key: round(value, 1) for key, value in values.items()}})
+    totals = {key: round(sum(item[key] for item in months), 1) for key in ("generation", "selfConsumption", "exported", "gridImport")}
+    totals["selfConsumptionPercent"] = round(totals["selfConsumption"] / totals["generation"] * 100, 1) if totals["generation"] else 0
+    totals["exportedPercent"] = round(totals["exported"] / totals["generation"] * 100, 1) if totals["generation"] else 0
+    return {
+        "sourceFile": source["file"], "year": source["year"], "availability": availability,
+        "shutdownDays": shutdown_days, "months": months, "totals": totals,
+        "note": "Estimación basada en E_Grid de PVSyst y el perfil horario mensual. Los fines de semana y festivos nacionales se modelan con carga cero.",
+    }
+
+
 def device_name(value: str) -> str:
     match = re.search(r"(Inverter\d+)", value)
     return match.group(1) if match else value
@@ -830,6 +1025,34 @@ def analyse(files: list[Path]) -> dict:
 
 def available_files() -> list[Path]:
     return sorted(DATA_DIR.glob("*.xlsx"), key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def available_simulation_files() -> list[Path]:
+    return sorted(SIMULATION_DIR.glob("*.xlsx"), key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def simulation_catalog() -> list[dict]:
+    """Inventario persistente de fuentes, separado de los archivos XLSX."""
+    try:
+        entries = json.loads(SIMULATION_INDEX.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        entries = []
+    valid = []
+    for entry in entries if isinstance(entries, list) else []:
+        filename = Path(str(entry.get("file", ""))).name
+        if filename and (SIMULATION_DIR / filename).is_file():
+            valid.append({**entry, "file": filename})
+    return sorted(valid, key=lambda item: item.get("updatedAt", ""), reverse=True)
+
+
+def save_simulation_catalog(entries: list[dict]) -> None:
+    temporary = SIMULATION_INDEX.with_suffix(".tmp")
+    temporary.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(SIMULATION_INDEX)
+
+
+def simulation_entry(source_id: str) -> dict | None:
+    return next((entry for entry in simulation_catalog() if entry.get("id") == source_id), None)
 
 
 def encode_session(username: str, role: str) -> str:
@@ -1054,12 +1277,44 @@ class Handler(SimpleHTTPRequestHandler):
             except FusionSolarError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
+        if route == "/api/simulation/report":
+            if not self.require_auth({"admin", "technician"}):
+                return
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                availability = float(query.get("availability", ["100"])[0])
+            except ValueError:
+                self.send_json({"error": "La disponibilidad debe ser un porcentaje válido."}, HTTPStatus.BAD_REQUEST)
+                return
+            with DATA_LOCK:
+                source_id = query.get("source", [""])[0]
+                entry = simulation_entry(source_id) if source_id else None
+                if entry is None and not source_id:
+                    entries = simulation_catalog()
+                    entry = entries[0] if len(entries) == 1 else None
+                if entry is None:
+                    self.send_json({"error": "Selecciona una planta con una fuente de consumo y PVSyst cargada."}, HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    report = simulation_report(SIMULATION_DIR / entry["file"], availability)
+                    report["source"] = {"id": entry["id"], "plant": entry["plant"], "year": entry["year"], "file": entry["sourceFile"]}
+                    self.send_json(report)
+                except (KeyError, OSError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
+                    self.send_json({"error": f"No se pudo leer la fuente de simulación: {error}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            return
+        if route == "/api/simulation/sources":
+            if not self.require_auth({"admin", "technician"}):
+                return
+            self.send_json({"sources": [{key: entry[key] for key in ("id", "plant", "year", "sourceFile", "updatedAt")} for entry in simulation_catalog()]})
+            return
         if route == "/":
             self.path = "/static/index.html"
         return super().do_GET()
 
     def do_POST(self):
-        route = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        route = parsed_url.path
+        query = parse_qs(parsed_url.query)
         if route == "/api/login":
             self.handle_login()
             return
@@ -1067,7 +1322,7 @@ class Handler(SimpleHTTPRequestHandler):
             if self.require_auth():
                 self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
             return
-        if route != "/api/upload":
+        if route not in {"/api/upload", "/api/simulation/upload"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.require_auth({"admin", "technician"}):
@@ -1088,6 +1343,39 @@ class Handler(SimpleHTTPRequestHandler):
         valid_uploads = [(filename, upload) for filename, upload in valid_uploads if filename.lower().endswith(".xlsx")]
         if not valid_uploads:
             self.send_json({"error": "Selecciona al menos un archivo XLSX válido."}, HTTPStatus.BAD_REQUEST)
+            return
+        if route == "/api/simulation/upload":
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                if len(valid_uploads) != 1:
+                    self.send_json({"error": "Carga un solo XLSX que contenga el consumo horario y las hojas PVSyst."}, HTTPStatus.BAD_REQUEST)
+                    return
+                filename, upload = valid_uploads[0]
+                temporary_file = Path(temporary_directory) / f"{uuid.uuid4().hex}_{filename}"
+                with temporary_file.open("wb") as output:
+                    shutil.copyfileobj(upload.file, output)
+                try:
+                    source = simulation_source(temporary_file)
+                except (KeyError, OSError, ValueError, ET.ParseError, zipfile.BadZipFile) as error:
+                    self.send_json({"error": f"El archivo no contiene una fuente completa de simulación: {error}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                    return
+                with DATA_LOCK:
+                    plant = query.get("plant", [""])[0].strip()
+                    if not plant or len(plant) > 80:
+                        self.send_json({"error": "Indica un nombre de planta de hasta 80 caracteres."}, HTTPStatus.BAD_REQUEST)
+                        return
+                    entries = simulation_catalog()
+                    previous = [entry for entry in entries if entry.get("plant", "").casefold() == plant.casefold()]
+                    for entry in previous:
+                        previous_path = SIMULATION_DIR / Path(str(entry.get("file", ""))).name
+                        if previous_path.is_file():
+                            previous_path.unlink()
+                    entries = [entry for entry in entries if entry not in previous]
+                    source_id = uuid.uuid4().hex
+                    destination = SIMULATION_DIR / f"{source_id[:8]}_{filename}"
+                    shutil.copyfile(temporary_file, destination)
+                    entries.append({"id": source_id, "plant": plant, "file": destination.name, "sourceFile": filename, "year": source["year"], "updatedAt": datetime.now(timezone.utc).isoformat()})
+                    save_simulation_catalog(entries)
+            self.send_json({"message": "Fuente de simulación cargada", "source": {"id": source_id, "plant": plant, "file": filename, "year": source["year"]}}, HTTPStatus.CREATED)
             return
         # Guardar primero en un área temporal y validar registros reales. Esto
         # admite variantes de encabezados de FusionSolar sin aceptar inventarios.
@@ -1124,16 +1412,28 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_json({"message": "Datos reemplazados", "files": saved}, HTTPStatus.CREATED)
 
     def do_DELETE(self):
-        if urlparse(self.path).path != "/api/data":
+        route = urlparse(self.path).path
+        if route not in {"/api/data", "/api/simulation/data"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.require_auth({"admin"}):
             return
         with DATA_LOCK:
             deleted = 0
-            for previous_file in DATA_DIR.glob("*.xlsx"):
-                previous_file.unlink()
-                deleted += 1
+            if route == "/api/simulation/data":
+                source_id = parse_qs(urlparse(self.path).query).get("source", [""])[0]
+                entries = simulation_catalog()
+                selected = [entry for entry in entries if entry.get("id") == source_id] if source_id else entries
+                for entry in selected:
+                    previous_file = SIMULATION_DIR / Path(str(entry.get("file", ""))).name
+                    if previous_file.is_file():
+                        previous_file.unlink()
+                        deleted += 1
+                save_simulation_catalog([entry for entry in entries if entry not in selected])
+            else:
+                for previous_file in DATA_DIR.glob("*.xlsx"):
+                    previous_file.unlink()
+                    deleted += 1
         self.send_json({"message": "Datos eliminados", "deleted": deleted})
 
     def send_json(self, data: dict, status: HTTPStatus = HTTPStatus.OK, cookies: list[str] | None = None):
