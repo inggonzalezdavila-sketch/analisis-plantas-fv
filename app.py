@@ -156,6 +156,15 @@ def station_list(response: dict) -> list[dict]:
     return plants
 
 
+def fusionsolar_station_list_error(response: object) -> FusionSolarError:
+    """Expone solo un código técnico seguro cuando FusionSolar rechaza el listado."""
+    if not isinstance(response, dict):
+        return FusionSolarError("FusionSolar respondió con un formato no válido al consultar las plantas.")
+    code = response.get("failCode") or response.get("errorCode") or response.get("code")
+    suffix = f" Código reportado: {str(code)[:40]}." if code not in {None, ""} else ""
+    return FusionSolarError("FusionSolar no autorizó el listado de plantas." + suffix)
+
+
 def fusionsolar_plants() -> list[dict]:
     """Lista plantas autorizadas con la API básica, sin llamadas de control."""
     now = time.time()
@@ -166,7 +175,7 @@ def fusionsolar_plants() -> list[dict]:
         base_url, opener, token = fusionsolar_authenticated_client()
         response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
         if not isinstance(response, dict) or not response.get("success"):
-            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
+            raise fusionsolar_station_list_error(response)
         plants = station_list(response)
         FUSIONSOLAR_CACHE["plants"] = plants
         FUSIONSOLAR_CACHE["expires"] = now + FUSIONSOLAR_CACHE_SECONDS
