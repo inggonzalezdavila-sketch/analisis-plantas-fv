@@ -7,5 +7,6 @@ data/*.csv
 .env
 __pycache__/
 *.py[cod]
+.artifact_build/
 .DS_Store
 desktop.ini

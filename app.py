@@ -720,11 +720,12 @@ def row_month(cells: dict[int, str]) -> int | None:
 
 
 def simulation_source(path: Path) -> dict:
-    """Extrae consumo horario y producción PVSyst desde un mismo libro de cálculo."""
+    """Extrae la plantilla estándar o el libro histórico de consumo y PVSyst."""
     consumption: dict[date, list[float]] = {}
     monthly_generation: dict[int, float] = {}
     hourly_profiles: dict[int, list[float]] = {}
     hourly_profile_priority: dict[int, int] = {}
+    configured_plant = ""
 
     for rows in workbook_rows(path):
         for row_index, cells in enumerate(rows):
@@ -752,14 +753,23 @@ def simulation_source(path: Path) -> dict:
                     if all(value is not None for value in values):
                         consumption[day] = [float(value) for value in values]
 
-            generation_column = next((column for column, value in headers.items() if value == "egrid"), None)
+            field_column = next((column for column, value in headers.items() if value == "campo"), None)
+            value_column = next((column for column, value in headers.items() if value == "valor"), None)
+            if field_column is not None and value_column is not None:
+                for data_row in rows[row_index + 1:]:
+                    if normalise_header(data_row.get(field_column, "")) == "nombredelaplanta":
+                        configured_plant = data_row.get(value_column, "").strip() or configured_plant
+
+            generation_column = next((column for column, value in headers.items() if value == "egrid" or value.startswith("egrid")), None)
             if generation_column is not None:
+                generation_header = headers[generation_column]
+                generation_multiplier = 1 if "kwh" in generation_header else 1000
                 for data_row in rows[row_index + 1:]:
                     month = row_month(data_row)
                     generation = xlsx_number(data_row.get(generation_column, ""))
                     if month and generation is not None and generation > 0:
-                        # PVSyst entrega E_Grid en MWh en este reporte.
-                        monthly_generation[month] = generation * 1000
+                        # El reporte PVSyst original usa MWh. La plantilla admite MWh o kWh.
+                        monthly_generation[month] = generation * generation_multiplier
 
             profile_columns = {
                 int(match.group(1)): column
@@ -776,10 +786,10 @@ def simulation_source(path: Path) -> dict:
                         hourly_profile_priority[month] = profile_priority
 
     if not consumption:
-        raise ValueError("No se encontró una hoja de consumo activo con Fecha/Hora y las 24 horas.")
+        raise ValueError("No se encontró consumo activo completo. Usa la plantilla: Fecha y Hora 0 a Hora 23, en kWh.")
     missing_months = [month for month in range(1, 13) if month not in monthly_generation or month not in hourly_profiles]
     if missing_months:
-        raise ValueError("No se encontró la simulación PVSyst completa (E_Grid y perfil horario de los 12 meses).")
+        raise ValueError("Falta la simulación FV completa: E_Grid y perfil horario para los 12 meses. Revisa la plantilla.")
     years = {day.year for day in consumption}
     if len(years) != 1:
         raise ValueError("El archivo debe contener un único año completo de consumo para esta simulación.")
@@ -789,6 +799,7 @@ def simulation_source(path: Path) -> dict:
     return {
         "file": path.name,
         "year": year,
+        "plant": configured_plant,
         "consumption": consumption,
         "monthlyGeneration": monthly_generation,
         "hourlyProfiles": hourly_profiles,
@@ -1359,9 +1370,9 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json({"error": f"El archivo no contiene una fuente completa de simulación: {error}"}, HTTPStatus.UNPROCESSABLE_ENTITY)
                     return
                 with DATA_LOCK:
-                    plant = query.get("plant", [""])[0].strip()
+                    plant = query.get("plant", [""])[0].strip() or source.get("plant", "")
                     if not plant or len(plant) > 80:
-                        self.send_json({"error": "Indica un nombre de planta de hasta 80 caracteres."}, HTTPStatus.BAD_REQUEST)
+                        self.send_json({"error": "Indica el nombre de la planta en la plantilla o en la aplicación (máximo 80 caracteres)."}, HTTPStatus.BAD_REQUEST)
                         return
                     entries = simulation_catalog()
                     previous = [entry for entry in entries if entry.get("plant", "").casefold() == plant.casefold()]
