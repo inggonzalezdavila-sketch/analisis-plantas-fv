@@ -727,8 +727,8 @@ def simulation_source(path: Path) -> dict:
     hourly_profile_priority: dict[int, int] = {}
     configured_plant = ""
     configured_capacity = None
-    configured_tariff = None
-    actual_generation: dict[int, float] = {}
+    grid_tariff = None
+    export_tariff = None
     solar_resource: dict[int, float] = {}
 
     for rows in workbook_rows(path):
@@ -767,14 +767,15 @@ def simulation_source(path: Path) -> dict:
                         configured_plant = data_row.get(value_column, "").strip() or configured_plant
                     elif field == "capacidadfvinstaladakwp":
                         configured_capacity = xlsx_number(value) or configured_capacity
-                    elif field == "tarifadeenergiaevitadacopkwh":
-                        configured_tariff = xlsx_number(value) or configured_tariff
+                    elif field in {"tarifadecompraderedcopkwh", "tarifadeenergiaevitadacopkwh"}:
+                        grid_tariff = xlsx_number(value) or grid_tariff
+                    elif field == "tarifadeexportacioncopkwh":
+                        export_tariff = xlsx_number(value) or export_tariff
 
             generation_column = next((column for column, value in headers.items() if value == "egrid" or value.startswith("egrid")), None)
             if generation_column is not None:
                 generation_header = headers[generation_column]
                 generation_multiplier = 1 if "kwh" in generation_header else 1000
-                actual_column = next((column for column, value in headers.items() if value.startswith("generacionreal") or value.startswith("produccionreal")), None)
                 radiation_column = next((column for column, value in headers.items() if value.startswith("globhor") or value.startswith("globinc") or value.startswith("globeff")), None)
                 for data_row in rows[row_index + 1:]:
                     month = row_month(data_row)
@@ -782,9 +783,6 @@ def simulation_source(path: Path) -> dict:
                     if month and generation is not None and generation > 0:
                         # El reporte PVSyst original usa MWh. La plantilla admite MWh o kWh.
                         monthly_generation[month] = generation * generation_multiplier
-                    actual = xlsx_number(data_row.get(actual_column, "")) if actual_column is not None else None
-                    if month and actual is not None and actual >= 0:
-                        actual_generation[month] = actual
                     radiation = xlsx_number(data_row.get(radiation_column, "")) if radiation_column is not None else None
                     if month and radiation is not None and radiation >= 0:
                         solar_resource[month] = radiation
@@ -819,8 +817,8 @@ def simulation_source(path: Path) -> dict:
         "year": year,
         "plant": configured_plant,
         "capacity": configured_capacity,
-        "tariff": configured_tariff,
-        "actualGeneration": actual_generation,
+        "gridTariff": grid_tariff,
+        "exportTariff": export_tariff,
         "solarResource": solar_resource,
         "consumption": consumption,
         "monthlyGeneration": monthly_generation,
@@ -880,40 +878,30 @@ def simulation_report(path: Path, availability: float = 100.0) -> dict:
 
     months = []
     for month, values in month_results.items():
-        expected = values["generation"]
-        actual = source["actualGeneration"].get(month)
-        deviation = max(expected - actual, 0) if actual is not None else None
         months.append({
             "month": month,
             "label": date(source["year"], month, 1).strftime("%B").capitalize(),
             **{key: round(value, 1) for key, value in values.items()},
-            "actualGeneration": round(actual, 1) if actual is not None else None,
-            "deviation": round(deviation, 1) if deviation is not None else None,
             "solarResource": source["solarResource"].get(month),
         })
     totals = {key: round(sum(item[key] for item in months), 1) for key in ("generation", "selfConsumption", "exported", "gridImport")}
     totals["selfConsumptionPercent"] = round(totals["selfConsumption"] / totals["generation"] * 100, 1) if totals["generation"] else 0
     totals["exportedPercent"] = round(totals["exported"] / totals["generation"] * 100, 1) if totals["generation"] else 0
-    measured_months = [item for item in months if item["actualGeneration"] is not None]
-    expected_measured = sum(item["generation"] for item in measured_months)
-    actual_measured = sum(item["actualGeneration"] for item in measured_months)
-    lost_generation = sum(item["deviation"] for item in measured_months)
-    tariff = source["tariff"]
-    performance = {
-        "available": bool(measured_months),
-        "coverageMonths": len(measured_months),
-        "expectedGeneration": round(expected_measured, 1),
-        "actualGeneration": round(actual_measured, 1),
-        "deviation": round(lost_generation, 1),
-        "performancePercent": round(actual_measured / expected_measured * 100, 1) if expected_measured else None,
-        "economicLoss": round(lost_generation * tariff, 0) if tariff is not None else None,
-        "tariff": tariff,
+    grid_tariff = source["gridTariff"]
+    export_tariff = source["exportTariff"]
+    economics = {
+        "available": grid_tariff is not None or export_tariff is not None,
+        "gridTariff": grid_tariff,
+        "exportTariff": export_tariff,
+        "selfConsumptionValue": round(totals["selfConsumption"] * grid_tariff, 0) if grid_tariff is not None else None,
+        "gridPurchaseCost": round(totals["gridImport"] * grid_tariff, 0) if grid_tariff is not None else None,
+        "exportRevenue": round(totals["exported"] * export_tariff, 0) if export_tariff is not None else None,
         "solarResource": round(sum(source["solarResource"].values()), 1) if source["solarResource"] else None,
         "capacity": source["capacity"],
     }
     return {
         "sourceFile": source["file"], "year": source["year"], "availability": availability,
-        "shutdownDays": shutdown_days, "months": months, "totals": totals, "performance": performance,
+        "shutdownDays": shutdown_days, "months": months, "totals": totals, "economics": economics,
         "note": "Estimación basada en E_Grid de PVSyst y el perfil horario mensual. Los fines de semana y festivos nacionales se modelan con carga cero.",
     }
 
