@@ -31,6 +31,7 @@
   <section id="empty-state" class="empty" hidden><h2>Aún no hay datos</h2><p>Carga uno o más reportes XLSX exportados desde la planta para iniciar el análisis.</p></section>
   <main id="app" hidden>
     <section class="cards" id="summary"></section>
+    <section id="analysis-report-actions" class="analysis-report-actions" hidden><div><p class="eyebrow">INFORME PARA CLIENTE</p><p>Resume los resultados del período cargado con sus alertas, diagnósticos y alcance.</p></div><button id="analysis-print" class="analyse" type="button">Imprimir / guardar informe PDF</button></section>
     <section id="comparison" class="comparison" hidden></section>
     <section id="plant-visuals" class="plant-visuals"></section>
     <section class="panel"><div class="section-title"><div><p class="eyebrow">PRIORIDAD OPERATIVA</p><h2>Alertas y acciones sugeridas</h2></div></div><div id="alerts" class="alerts"></div></section>
@@ -38,5 +39,6 @@
     <section class="panel"><div class="section-title"><div><p class="eyebrow">GENERACIÓN</p><h2>Producción diaria por planta</h2></div><span class="legend"><i></i> Primera planta <i class="green"></i> Segunda planta</span></div><div id="chart" class="chart"></div></section>
     <section class="panel"><div class="section-title"><div><p class="eyebrow">ACTIVOS</p><h2>Estado de plantas e inversores</h2></div></div><div id="plants" class="plants"></div></section>
   </main>
+  <article id="operational-report" class="detailed-report operational-report" hidden aria-live="polite"></article>
   <script src="/static/app.js"></script>
 </body></html>
