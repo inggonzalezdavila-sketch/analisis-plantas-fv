@@ -86,36 +86,51 @@ def soliscloud_post(path: str, payload: dict) -> dict:
     """Ejecuta una llamada HMAC-SHA1 de solo lectura contra SolisCloud."""
     base_url, key_id, key_secret = soliscloud_configuration()
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    content_type = "application/json;charset=UTF-8"
     content_md5 = base64.b64encode(hashlib.md5(body).digest()).decode("ascii")
-    date_header = formatdate(usegmt=True)
-    # V2.0.3: la cadena HMAC concatena exactamente los cinco elementos,
-    # separados por saltos de línea, sin espacios adicionales.
-    sign_string = f"POST\n{content_md5}\n{content_type}\n{date_header}\n{path}"
-    signature = base64.b64encode(hmac.new(key_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha1).digest()).decode("ascii")
-    headers = {
-        "Content-MD5": content_md5,
-        "Content-Type": content_type,
-        "Date": date_header,
-        "Authorization": f"API {key_id}:{signature}",
-        "Accept": "application/json",
-        "User-Agent": SOLISCLOUD_USER_AGENT,
-    }
-    request = Request(base_url + path, data=body, headers=headers, method="POST")
-    try:
-        with build_opener().open(request, timeout=15) as response:
-            raw = response.read(1_000_000)
-            parsed = json.loads(raw.decode("utf-8"))
-    except HTTPError as error:
-        if error.code in {401, 403}:
+    # Hay dos variantes publicadas por SolisCloud: algunos ejemplos firman
+    # application/json y otros application/json;charset=UTF-8. Probamos las
+    # variantes documentadas solo cuando el servidor rechaza la autenticación.
+    content_types = [
+        ("application/json;charset=UTF-8", "application/json;charset=UTF-8"),
+        ("application/json", "application/json"),
+        # Compatibilidad con el ejemplo Python publicado por SolisCloud,
+        # que muestra un espacio delante del tercer elemento firmado.
+        ("application/json;charset=UTF-8", " application/json;charset=UTF-8"),
+    ]
+    last_auth_error = False
+    for content_type, signed_content_type in content_types:
+        date_header = formatdate(usegmt=True)
+        sign_string = f"POST\n{content_md5}\n{signed_content_type}\n{date_header}\n{path}"
+        signature = base64.b64encode(hmac.new(key_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha1).digest()).decode("ascii")
+        headers = {
+            "Content-MD5": content_md5,
+            "Content-Type": content_type,
+            "Date": date_header,
+            "Authorization": f"API {key_id}:{signature}",
+            "Accept": "application/json",
+            "User-Agent": SOLISCLOUD_USER_AGENT,
+        }
+        request = Request(base_url + path, data=body, headers=headers, method="POST")
+        try:
+            with build_opener().open(request, timeout=15) as response:
+                raw = response.read(1_000_000)
+                parsed = json.loads(raw.decode("utf-8"))
+            break
+        except HTTPError as error:
+            if error.code in {401, 403}:
+                last_auth_error = True
+                continue
+            if error.code == 429:
+                raise SolisCloudError("SolisCloud limitó temporalmente las consultas. Espera unos minutos e intenta de nuevo.")
+            raise SolisCloudError("SolisCloud no pudo completar la consulta en este momento.")
+        except (URLError, TimeoutError, OSError):
+            raise SolisCloudError("No fue posible comunicarse con SolisCloud. Intenta nuevamente en unos minutos.")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise SolisCloudError("SolisCloud devolvió una respuesta no reconocida.")
+    else:
+        if last_auth_error:
             raise SolisCloudError("SolisCloud rechazó la autenticación. Verifica que la API esté activada y que la clave sea vigente.")
-        if error.code == 429:
-            raise SolisCloudError("SolisCloud limitó temporalmente las consultas. Espera unos minutos e intenta de nuevo.")
         raise SolisCloudError("SolisCloud no pudo completar la consulta en este momento.")
-    except (URLError, TimeoutError, OSError):
-        raise SolisCloudError("No fue posible comunicarse con SolisCloud. Intenta nuevamente en unos minutos.")
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise SolisCloudError("SolisCloud devolvió una respuesta no reconocida.")
     if not isinstance(parsed, dict) or parsed.get("success") is False or str(parsed.get("code", "0")) not in {"0", "200"}:
         raise SolisCloudError("SolisCloud devolvió un error al consultar los datos.")
     return parsed
