@@ -89,8 +89,9 @@ def soliscloud_post(path: str, payload: dict) -> dict:
     content_type = "application/json;charset=UTF-8"
     content_md5 = base64.b64encode(hashlib.md5(body).digest()).decode("ascii")
     date_header = formatdate(usegmt=True)
-    # SolisCloud documenta un espacio delante de Content-Type dentro de la cadena firmada.
-    sign_string = f"POST\n{content_md5}\n {content_type}\n{date_header}\n{path}"
+    # V2.0.3: la cadena HMAC concatena exactamente los cinco elementos,
+    # separados por saltos de línea, sin espacios adicionales.
+    sign_string = f"POST\n{content_md5}\n{content_type}\n{date_header}\n{path}"
     signature = base64.b64encode(hmac.new(key_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha1).digest()).decode("ascii")
     headers = {
         "Content-MD5": content_md5,
@@ -132,7 +133,7 @@ def soliscloud_plants() -> list[dict]:
     with SOLISCLOUD_LOCK:
         if SOLISCLOUD_CACHE["plants"] is not None and float(SOLISCLOUD_CACHE["expires"]) > time.time():
             return SOLISCLOUD_CACHE["plants"]
-    records = soliscloud_records(soliscloud_post("/v1/api/userStationList", {}))
+    records = soliscloud_records(soliscloud_post("/v1/api/userStationList", {"pageNo": 1, "pageSize": 100}))
     plants = [{
         "id": record.get("id"),
         "name": record.get("stationName") or "Planta sin nombre",
@@ -158,7 +159,8 @@ def soliscloud_inverters(plant_id: str | None = None) -> list[dict]:
         cached = SOLISCLOUD_CACHE["inverters"].get(key)
         if cached and cached["expires"] > time.time():
             return cached["records"]
-    payload = {"plantId": plant_id} if plant_id else {}
+    payload = {"stationId": plant_id} if plant_id else {}
+    payload.update({"pageNo": 1, "pageSize": 100})
     records = soliscloud_records(soliscloud_post("/v1/api/inverterList", payload))
     inverters = [{
         "id": record.get("id"),
