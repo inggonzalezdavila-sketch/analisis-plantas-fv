@@ -73,8 +73,10 @@ class SolisCloudError(Exception):
 def soliscloud_configuration() -> tuple[str, str, str]:
     """Lee las credenciales SolisCloud solo desde secretos del servidor."""
     base_url = os.environ.get("SOLISCLOUD_BASE_URL", "https://www.soliscloud.com:13333").rstrip("/")
-    key_id = os.environ.get("SOLISCLOUD_KEY_ID", "").strip()
-    key_secret = os.environ.get("SOLISCLOUD_KEY_SECRET", "").strip()
+    # Admitimos los nombres del panel y los nombres API ID/API Secret usados
+    # literalmente por la documentación de SolisCloud.
+    key_id = (os.environ.get("SOLISCLOUD_KEY_ID") or os.environ.get("SOLISCLOUD_API_ID") or "").strip()
+    key_secret = (os.environ.get("SOLISCLOUD_KEY_SECRET") or os.environ.get("SOLISCLOUD_API_SECRET") or "").strip()
     parsed = urlparse(base_url)
     trusted_host = parsed.hostname and (parsed.hostname == "soliscloud.com" or parsed.hostname.endswith(".soliscloud.com"))
     if parsed.scheme != "https" or not trusted_host or not key_id or not key_secret:
