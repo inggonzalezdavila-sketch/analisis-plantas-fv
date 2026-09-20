@@ -51,3 +51,7 @@ Roles disponibles: `admin` puede consultar, cargar y limpiar datos; `technician`
 ## Conexión FusionSolar de solo lectura
 
 Para conectar FusionSolar, cree una cuenta **northbound API** separada, limitada a las plantas necesarias y con solo **Interfaces API básicas**. En Render agregue como variables de entorno secretas `FUSIONSOLAR_BASE_URL`, `FUSIONSOLAR_USERNAME` y `FUSIONSOLAR_SYSTEM_CODE`. La aplicación nunca envía estas claves al navegador ni las registra en los logs. Por ahora, la conexión solo lista las plantas autorizadas: no consulta ni ofrece APIs de control, configuración o escritura. El listado se conserva en memoria durante cinco minutos para reducir inicios de sesión y llamadas al fabricante.
+
+## Conexión SolisCloud de solo lectura
+
+En Render agregue como variables secretas `SOLISCLOUD_KEY_ID` y `SOLISCLOUD_KEY_SECRET`. `SOLISCLOUD_BASE_URL` es opcional y por defecto usa `https://www.soliscloud.com:13333`. La aplicación firma las solicitudes con HMAC-SHA1 en el servidor y no envía ni registra las claves en el navegador. El panel de SolisCloud consulta únicamente las plantas (`/v1/api/userStationList`) y los inversores (`/v1/api/inverterList`) autorizados para la cuenta. No se habilitan comandos de control ni escritura.

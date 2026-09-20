@@ -23,6 +23,7 @@ import uuid
 import zipfile
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
+from email.utils import formatdate
 from http import HTTPStatus
 from http.cookiejar import CookieJar
 from http.cookies import SimpleCookie
@@ -55,10 +56,125 @@ FUSIONSOLAR_CACHE_SECONDS = 5 * 60
 FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None, "reports": {}}
 FUSIONSOLAR_LOCK = threading.Lock()
 FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
+SOLISCLOUD_USER_AGENT = "MLY-SolarOps/1.0 (read-only)"
+SOLISCLOUD_CACHE_SECONDS = 5 * 60
+SOLISCLOUD_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "inverters": {}}
+SOLISCLOUD_LOCK = threading.Lock()
 
 
 class FusionSolarError(Exception):
     """Error seguro: nunca devuelve credenciales, tokens ni respuestas externas."""
+
+
+class SolisCloudError(Exception):
+    """Error seguro de SolisCloud: nunca expone claves ni respuestas completas."""
+
+
+def soliscloud_configuration() -> tuple[str, str, str]:
+    """Lee las credenciales SolisCloud solo desde secretos del servidor."""
+    base_url = os.environ.get("SOLISCLOUD_BASE_URL", "https://www.soliscloud.com:13333").rstrip("/")
+    key_id = os.environ.get("SOLISCLOUD_KEY_ID", "")
+    key_secret = os.environ.get("SOLISCLOUD_KEY_SECRET", "")
+    parsed = urlparse(base_url)
+    trusted_host = parsed.hostname and (parsed.hostname == "soliscloud.com" or parsed.hostname.endswith(".soliscloud.com"))
+    if parsed.scheme != "https" or not trusted_host or not key_id or not key_secret:
+        raise SolisCloudError("La conexión SolisCloud aún no está configurada en el servidor.")
+    return base_url, key_id, key_secret
+
+
+def soliscloud_post(path: str, payload: dict) -> dict:
+    """Ejecuta una llamada HMAC-SHA1 de solo lectura contra SolisCloud."""
+    base_url, key_id, key_secret = soliscloud_configuration()
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    content_type = "application/json;charset=UTF-8"
+    content_md5 = base64.b64encode(hashlib.md5(body).digest()).decode("ascii")
+    date_header = formatdate(usegmt=True)
+    sign_string = f"POST\n{content_md5}\n{content_type}\n{date_header}\n{path}"
+    signature = base64.b64encode(hmac.new(key_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha1).digest()).decode("ascii")
+    headers = {
+        "Content-MD5": content_md5,
+        "Content-Type": content_type,
+        "Date": date_header,
+        "Authorization": f"API {key_id}:{signature}",
+        "Accept": "application/json",
+        "User-Agent": SOLISCLOUD_USER_AGENT,
+    }
+    request = Request(base_url + path, data=body, headers=headers, method="POST")
+    try:
+        with build_opener().open(request, timeout=15) as response:
+            raw = response.read(1_000_000)
+            parsed = json.loads(raw.decode("utf-8"))
+    except HTTPError as error:
+        if error.code in {401, 403}:
+            raise SolisCloudError("SolisCloud rechazó la autenticación. Verifica que la API esté activada y que la clave sea vigente.")
+        if error.code == 429:
+            raise SolisCloudError("SolisCloud limitó temporalmente las consultas. Espera unos minutos e intenta de nuevo.")
+        raise SolisCloudError("SolisCloud no pudo completar la consulta en este momento.")
+    except (URLError, TimeoutError, OSError):
+        raise SolisCloudError("No fue posible comunicarse con SolisCloud. Intenta nuevamente en unos minutos.")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise SolisCloudError("SolisCloud devolvió una respuesta no reconocida.")
+    if not isinstance(parsed, dict) or parsed.get("success") is False or str(parsed.get("code", "0")) not in {"0", "200"}:
+        raise SolisCloudError("SolisCloud devolvió un error al consultar los datos.")
+    return parsed
+
+
+def soliscloud_records(response: dict) -> list[dict]:
+    """Normaliza las respuestas paginadas del API sin exponer el payload original."""
+    data = response.get("data") or {}
+    page = data.get("page") if isinstance(data, dict) else None
+    records = page.get("records", []) if isinstance(page, dict) else data
+    return records if isinstance(records, list) else []
+
+
+def soliscloud_plants() -> list[dict]:
+    with SOLISCLOUD_LOCK:
+        if SOLISCLOUD_CACHE["plants"] is not None and float(SOLISCLOUD_CACHE["expires"]) > time.time():
+            return SOLISCLOUD_CACHE["plants"]
+    records = soliscloud_records(soliscloud_post("/v1/api/userStationList", {}))
+    plants = [{
+        "id": record.get("id"),
+        "name": record.get("stationName") or "Planta sin nombre",
+        "plantId": record.get("plantId"),
+        "capacity": record.get("capacity"),
+        "power": record.get("power"),
+        "dayEnergy": record.get("dayEnergy"),
+        "monthEnergy": record.get("monthEnergy"),
+        "yearEnergy": record.get("yearEnergy"),
+        "allEnergy": record.get("allEnergy"),
+        "state": record.get("state"),
+        "dataTimestamp": record.get("dataTimestamp"),
+    } for record in records if isinstance(record, dict)]
+    with SOLISCLOUD_LOCK:
+        SOLISCLOUD_CACHE["plants"] = plants
+        SOLISCLOUD_CACHE["expires"] = time.time() + SOLISCLOUD_CACHE_SECONDS
+    return plants
+
+
+def soliscloud_inverters(plant_id: str | None = None) -> list[dict]:
+    key = plant_id or "__all__"
+    with SOLISCLOUD_LOCK:
+        cached = SOLISCLOUD_CACHE["inverters"].get(key)
+        if cached and cached["expires"] > time.time():
+            return cached["records"]
+    payload = {"plantId": plant_id} if plant_id else {}
+    records = soliscloud_records(soliscloud_post("/v1/api/inverterList", payload))
+    inverters = [{
+        "id": record.get("id"),
+        "sn": record.get("sn"),
+        "plantId": record.get("stationId"),
+        "plantName": record.get("stationName"),
+        "capacity": record.get("power"),
+        "todayEnergy": record.get("etoday"),
+        "totalEnergy": record.get("etotal"),
+        "power": record.get("pac"),
+        "state": record.get("state"),
+        "dataTimestamp": record.get("dataTimestamp"),
+        "model": record.get("productModel"),
+    } for record in records if isinstance(record, dict)]
+    with SOLISCLOUD_LOCK:
+        SOLISCLOUD_CACHE["inverters"][key] = {"expires": time.time() + SOLISCLOUD_CACHE_SECONDS, "records": inverters}
+    return inverters
 
 
 def fusionsolar_configuration() -> tuple[str, str, str]:
@@ -1283,6 +1399,25 @@ class Handler(SimpleHTTPRequestHandler):
                     self.send_json(result)
                 except Exception as error:
                     self.send_json({"error": f"No se pudieron analizar los archivos: {error}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if route == "/api/soliscloud/plants":
+            if not self.require_auth({"admin"}):
+                return
+            try:
+                plants = soliscloud_plants()
+                self.send_json({"provider": "SolisCloud", "plants": plants, "cachedForSeconds": SOLISCLOUD_CACHE_SECONDS})
+            except SolisCloudError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        if route == "/api/soliscloud/inverters":
+            if not self.require_auth({"admin"}):
+                return
+            plant_id = parse_qs(urlparse(self.path).query).get("plantId", [""])[0] or None
+            try:
+                inverters = soliscloud_inverters(plant_id)
+                self.send_json({"provider": "SolisCloud", "inverters": inverters, "cachedForSeconds": SOLISCLOUD_CACHE_SECONDS})
+            except SolisCloudError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
         if route == "/api/fusionsolar/plants":
             if not self.require_auth({"admin"}):
