@@ -89,7 +89,8 @@ def soliscloud_post(path: str, payload: dict) -> dict:
     content_type = "application/json;charset=UTF-8"
     content_md5 = base64.b64encode(hashlib.md5(body).digest()).decode("ascii")
     date_header = formatdate(usegmt=True)
-    sign_string = f"POST\n{content_md5}\n{content_type}\n{date_header}\n{path}"
+    # SolisCloud documenta un espacio delante de Content-Type dentro de la cadena firmada.
+    sign_string = f"POST\n{content_md5}\n {content_type}\n{date_header}\n{path}"
     signature = base64.b64encode(hmac.new(key_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha1).digest()).decode("ascii")
     headers = {
         "Content-MD5": content_md5,
