@@ -245,9 +245,16 @@ def solarman_post(path: str, payload: dict, token: str | None = None) -> dict:
         raise SolarManError("No fue posible comunicarse con SOLARMAN en este momento.")
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise SolarManError("SOLARMAN devolvió una respuesta no reconocida.")
-    code = str(parsed.get("code", "10000")) if isinstance(parsed, dict) else "-1"
+    code_value = parsed.get("code", "10000") if isinstance(parsed, dict) else "-1"
+    # Algunas respuestas de SOLARMAN traen `code: null` y el motivo en
+    # `msg`/`message`. Conservamos ese detalle, sin mostrar credenciales.
+    code = str(code_value)
     if code not in {"0", "10000", "200"}:
-        raise SolarManError(f"SOLARMAN devolvió un error de consulta (código {code}).")
+        detail = ""
+        if isinstance(parsed, dict):
+            detail = parsed.get("msg") or parsed.get("message") or parsed.get("error") or ""
+        suffix = f": {detail}" if detail else ""
+        raise SolarManError(f"SOLARMAN devolvió un error de consulta (código {code}){suffix}.")
     return parsed
 
 
