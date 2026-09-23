@@ -267,8 +267,12 @@ def solarman_token() -> str:
         if token and float(SOLARMAN_CACHE.get("tokenExpires", 0)) > now + 60:
             return str(token)
     response = solarman_post("/account/v1.0/token", {})
+    # El endpoint de token devuelve access_token en la respuesta raíz (no en
+    # `data`), aunque algunas versiones lo anidan dentro de `data`.
     data = response.get("data") if isinstance(response, dict) else None
-    token = data.get("access_token") if isinstance(data, dict) else None
+    token = response.get("access_token") if isinstance(response, dict) else None
+    token = token or (response.get("accessToken") if isinstance(response, dict) else None)
+    token = token or (data.get("access_token") if isinstance(data, dict) else None)
     token = token or (data.get("accessToken") if isinstance(data, dict) else None)
     if not token:
         raise SolarManError("SOLARMAN no entregó un token de acceso.")
