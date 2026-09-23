@@ -246,10 +246,12 @@ def solarman_post(path: str, payload: dict, token: str | None = None) -> dict:
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise SolarManError("SOLARMAN devolvió una respuesta no reconocida.")
     code_value = parsed.get("code", "10000") if isinstance(parsed, dict) else "-1"
-    # Algunas respuestas de SOLARMAN traen `code: null` y el motivo en
-    # `msg`/`message`. Conservamos ese detalle, sin mostrar credenciales.
+    # SOLARMAN documenta respuestas exitosas con `success: true` y
+    # `code: null`; por eso null no debe tratarse como error.
+    success = parsed.get("success") if isinstance(parsed, dict) else False
     code = str(code_value)
-    if code not in {"0", "10000", "200"}:
+    is_error = success is False or (code_value is not None and code not in {"0", "10000", "200"})
+    if is_error:
         detail = ""
         if isinstance(parsed, dict):
             detail = parsed.get("msg") or parsed.get("message") or parsed.get("error") or ""
@@ -278,7 +280,10 @@ def solarman_token() -> str:
 
 def solarman_records(response: dict, keys: tuple[str, ...]) -> list[dict]:
     data = response.get("data") if isinstance(response, dict) else None
-    candidates = [data] if isinstance(data, dict) else []
+    # Las interfaces de estaciones devuelven stationList/deviceList en la
+    # respuesta raíz (no dentro de data), según la documentación oficial.
+    candidates = [response] if isinstance(response, dict) else []
+    candidates += [data] if isinstance(data, dict) else []
     candidates += [data.get(key) for key in keys] if isinstance(data, dict) else []
     for candidate in candidates:
         if isinstance(candidate, list):
