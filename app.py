@@ -437,6 +437,8 @@ def fusionsolar_station_list_error(response: object) -> FusionSolarError:
     if not isinstance(response, dict):
         return FusionSolarError("FusionSolar respondió con un formato no válido al consultar las plantas.")
     code = response.get("failCode") or response.get("errorCode") or response.get("code")
+    if str(code) == "407":
+        return FusionSolarError("FusionSolar limitó temporalmente las consultas (código 407). Espera 10 minutos antes de volver a consultar.")
     suffix = f" Código reportado: {str(code)[:40]}." if code not in {None, ""} else ""
     return FusionSolarError("FusionSolar no autorizó el listado de plantas." + suffix)
 
