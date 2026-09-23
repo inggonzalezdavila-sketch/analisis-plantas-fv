@@ -55,3 +55,5 @@ Para conectar FusionSolar, cree una cuenta **northbound API** separada, limitada
 ## Conexión SolisCloud de solo lectura
 
 En Render agregue como variables secretas `SOLISCLOUD_KEY_ID` y `SOLISCLOUD_KEY_SECRET`. `SOLISCLOUD_BASE_URL` es opcional y por defecto usa `https://www.soliscloud.com:13333`. La aplicación firma las solicitudes con HMAC-SHA1 en el servidor y no envía ni registra las claves en el navegador. El panel de SolisCloud consulta únicamente las plantas (`/v1/api/userStationList`) y los inversores (`/v1/api/inverterList`) autorizados para la cuenta. No se habilitan comandos de control ni escritura.
+
+Para conectar SOLARMAN Smart, agregue en Render las variables secretas `SOLARMAN_APP_ID`, `SOLARMAN_APP_SECRET`, `SOLARMAN_EMAIL` y `SOLARMAN_PASSWORD_SHA256`. Esta última debe ser la contraseña de SOLARMAN convertida a SHA-256 hexadecimal en minúsculas; no se almacena la contraseña original. `SOLARMAN_BASE_URL` es opcional y por defecto usa `https://globalapi.solarmanpv.com`. El panel consulta solo plantas y dispositivos autorizados mediante SOLARMAN OpenAPI; no ejecuta comandos de control.

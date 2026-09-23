@@ -32,7 +32,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 from xml.etree import ElementTree as ET
 
@@ -60,6 +60,9 @@ SOLISCLOUD_USER_AGENT = "MLY-SolarOps/1.0 (read-only)"
 SOLISCLOUD_CACHE_SECONDS = 5 * 60
 SOLISCLOUD_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "inverters": {}}
 SOLISCLOUD_LOCK = threading.Lock()
+SOLARMAN_CACHE_SECONDS = 5 * 60
+SOLARMAN_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "devices": None, "token": None, "tokenExpires": 0.0}
+SOLARMAN_LOCK = threading.Lock()
 
 
 class FusionSolarError(Exception):
@@ -68,6 +71,10 @@ class FusionSolarError(Exception):
 
 class SolisCloudError(Exception):
     """Error seguro de SolisCloud: nunca expone claves ni respuestas completas."""
+
+
+class SolarManError(Exception):
+    """Error seguro de SOLARMAN: nunca expone AppSecret, contraseña ni token."""
 
 
 def soliscloud_configuration() -> tuple[str, str, str]:
@@ -195,6 +202,114 @@ def soliscloud_inverters(plant_id: str | None = None) -> list[dict]:
     with SOLISCLOUD_LOCK:
         SOLISCLOUD_CACHE["inverters"][key] = {"expires": time.time() + SOLISCLOUD_CACHE_SECONDS, "records": inverters}
     return inverters
+
+
+def solarman_configuration() -> tuple[str, str, str, str, str]:
+    """Lee la configuración SOLARMAN solo desde secretos del servidor."""
+    base_url = os.environ.get("SOLARMAN_BASE_URL", "https://globalapi.solarmanpv.com").rstrip("/")
+    app_id = (os.environ.get("SOLARMAN_APP_ID") or "").strip()
+    app_secret = (os.environ.get("SOLARMAN_APP_SECRET") or "").strip()
+    email = (os.environ.get("SOLARMAN_EMAIL") or "").strip()
+    password_sha256 = (os.environ.get("SOLARMAN_PASSWORD_SHA256") or "").strip().lower()
+    parsed = urlparse(base_url)
+    trusted_host = parsed.hostname and (parsed.hostname == "solarmanpv.com" or parsed.hostname.endswith(".solarmanpv.com"))
+    if parsed.scheme != "https" or not trusted_host or not app_id or not app_secret or not email or not re.fullmatch(r"[0-9a-f]{64}", password_sha256):
+        raise SolarManError("La conexión SOLARMAN aún no está configurada en el servidor.")
+    return base_url, app_id, app_secret, email, password_sha256
+
+
+def solarman_post(path: str, payload: dict, token: str | None = None) -> dict:
+    """Consulta SOLARMAN OpenAPI en modo lectura."""
+    base_url, app_id, app_secret, email, password_sha256 = solarman_configuration()
+    headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "MLY-SolarOps/1.0 (read-only)"}
+    query = "?language=en"
+    if path == "/account/v1.0/token":
+        query = f"?appId={quote(app_id)}&language=en"
+        body = {"email": email, "appSecret": app_secret, "password": password_sha256}
+    else:
+        if not token:
+            raise SolarManError("SOLARMAN no entregó una sesión válida.")
+        headers["Authorization"] = f"bearer {token}"
+        body = payload
+    request = Request(base_url + path + query, data=json.dumps(body, separators=(",", ":")).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with build_opener().open(request, timeout=20) as response:
+            parsed = json.loads(response.read(2_000_000).decode("utf-8"))
+    except HTTPError as error:
+        if error.code in {401, 403}:
+            raise SolarManError("SOLARMAN rechazó la autenticación. Verifica AppId, AppSecret, correo y contraseña SHA-256.")
+        if error.code == 429:
+            raise SolarManError("SOLARMAN limitó temporalmente las consultas. Espera unos minutos e intenta de nuevo.")
+        raise SolarManError("SOLARMAN no pudo completar la consulta.")
+    except (URLError, TimeoutError, OSError):
+        raise SolarManError("No fue posible comunicarse con SOLARMAN en este momento.")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise SolarManError("SOLARMAN devolvió una respuesta no reconocida.")
+    code = str(parsed.get("code", "10000")) if isinstance(parsed, dict) else "-1"
+    if code not in {"0", "10000", "200"}:
+        raise SolarManError(f"SOLARMAN devolvió un error de consulta (código {code}).")
+    return parsed
+
+
+def solarman_token() -> str:
+    now = time.time()
+    with SOLARMAN_LOCK:
+        token = SOLARMAN_CACHE.get("token")
+        if token and float(SOLARMAN_CACHE.get("tokenExpires", 0)) > now + 60:
+            return str(token)
+    response = solarman_post("/account/v1.0/token", {})
+    data = response.get("data") if isinstance(response, dict) else None
+    token = data.get("access_token") if isinstance(data, dict) else None
+    token = token or (data.get("accessToken") if isinstance(data, dict) else None)
+    if not token:
+        raise SolarManError("SOLARMAN no entregó un token de acceso.")
+    with SOLARMAN_LOCK:
+        SOLARMAN_CACHE["token"] = token
+        SOLARMAN_CACHE["tokenExpires"] = now + 3600
+    return str(token)
+
+
+def solarman_records(response: dict, keys: tuple[str, ...]) -> list[dict]:
+    data = response.get("data") if isinstance(response, dict) else None
+    candidates = [data] if isinstance(data, dict) else []
+    candidates += [data.get(key) for key in keys] if isinstance(data, dict) else []
+    for candidate in candidates:
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+        if isinstance(candidate, dict):
+            for key in ("records", "list", "stationList", "deviceList"):
+                value = candidate.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def solarman_plants() -> list[dict]:
+    with SOLARMAN_LOCK:
+        if SOLARMAN_CACHE["plants"] is not None and float(SOLARMAN_CACHE["expires"]) > time.time():
+            return SOLARMAN_CACHE["plants"]
+    token = solarman_token()
+    response = solarman_post("/station/v1.0/list", {"page": 1, "size": 100}, token)
+    records = solarman_records(response, ("stationList", "stations"))
+    plants = [{"id": record.get("id") or record.get("stationId"), "name": record.get("name") or record.get("stationName") or "Planta sin nombre", "power": record.get("generationPower") or record.get("power"), "dayEnergy": record.get("generationToday") or record.get("dayEnergy"), "totalEnergy": record.get("generationTotal") or record.get("totalEnergy"), "state": record.get("state") or record.get("status")} for record in records]
+    with SOLARMAN_LOCK:
+        SOLARMAN_CACHE["plants"] = plants
+        SOLARMAN_CACHE["expires"] = time.time() + SOLARMAN_CACHE_SECONDS
+    return plants
+
+
+def solarman_devices() -> list[dict]:
+    with SOLARMAN_LOCK:
+        if SOLARMAN_CACHE["devices"] is not None and float(SOLARMAN_CACHE["expires"]) > time.time():
+            return SOLARMAN_CACHE["devices"]
+    token = solarman_token()
+    response = solarman_post("/station/v1.0/device", {"page": 1, "size": 100}, token)
+    records = solarman_records(response, ("deviceList", "devices"))
+    devices = [{"id": record.get("id") or record.get("deviceId"), "sn": record.get("deviceSn") or record.get("sn"), "plantId": record.get("stationId") or record.get("plantId"), "name": record.get("deviceName") or record.get("name"), "type": record.get("deviceType"), "state": record.get("deviceState") or record.get("state")} for record in records]
+    with SOLARMAN_LOCK:
+        SOLARMAN_CACHE["devices"] = devices
+        SOLARMAN_CACHE["expires"] = time.time() + SOLARMAN_CACHE_SECONDS
+    return devices
 
 
 def fusionsolar_configuration() -> tuple[str, str, str]:
@@ -1437,6 +1552,20 @@ class Handler(SimpleHTTPRequestHandler):
                 inverters = soliscloud_inverters(plant_id)
                 self.send_json({"provider": "SolisCloud", "inverters": inverters, "cachedForSeconds": SOLISCLOUD_CACHE_SECONDS})
             except SolisCloudError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        if route == "/api/solarman/plants":
+            try:
+                plants = solarman_plants()
+                self.send_json({"provider": "SOLARMAN", "plants": plants, "cachedForSeconds": SOLARMAN_CACHE_SECONDS})
+            except SolarManError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
+            return
+        if route == "/api/solarman/devices":
+            try:
+                devices = solarman_devices()
+                self.send_json({"provider": "SOLARMAN", "devices": devices, "cachedForSeconds": SOLARMAN_CACHE_SECONDS})
+            except SolarManError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_GATEWAY)
             return
         if route == "/api/fusionsolar/plants":
