@@ -204,28 +204,31 @@ def soliscloud_inverters(plant_id: str | None = None) -> list[dict]:
     return inverters
 
 
-def solarman_configuration() -> tuple[str, str, str, str, str]:
+def solarman_configuration() -> tuple[str, str, str, str, str, str]:
     """Lee la configuración SOLARMAN solo desde secretos del servidor."""
     base_url = os.environ.get("SOLARMAN_BASE_URL", "https://globalapi.solarmanpv.com").rstrip("/")
     app_id = (os.environ.get("SOLARMAN_APP_ID") or "").strip()
     app_secret = (os.environ.get("SOLARMAN_APP_SECRET") or "").strip()
     email = (os.environ.get("SOLARMAN_EMAIL") or "").strip()
     password_sha256 = (os.environ.get("SOLARMAN_PASSWORD_SHA256") or "").strip().lower()
+    org_id = (os.environ.get("SOLARMAN_ORG_ID") or "").strip()
     parsed = urlparse(base_url)
     trusted_host = parsed.hostname and (parsed.hostname == "solarmanpv.com" or parsed.hostname.endswith(".solarmanpv.com"))
     if parsed.scheme != "https" or not trusted_host or not app_id or not app_secret or not email or not re.fullmatch(r"[0-9a-f]{64}", password_sha256):
         raise SolarManError("La conexión SOLARMAN aún no está configurada en el servidor.")
-    return base_url, app_id, app_secret, email, password_sha256
+    return base_url, app_id, app_secret, email, password_sha256, org_id
 
 
 def solarman_post(path: str, payload: dict, token: str | None = None) -> dict:
     """Consulta SOLARMAN OpenAPI en modo lectura."""
-    base_url, app_id, app_secret, email, password_sha256 = solarman_configuration()
+    base_url, app_id, app_secret, email, password_sha256, org_id = solarman_configuration()
     headers = {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "MLY-SolarOps/1.0 (read-only)"}
     query = "?language=en"
     if path == "/account/v1.0/token":
         query = f"?appId={quote(app_id)}&language=en"
         body = {"email": email, "appSecret": app_secret, "password": password_sha256}
+        if org_id:
+            body["orgId"] = int(org_id) if org_id.isdigit() else org_id
     else:
         if not token:
             raise SolarManError("SOLARMAN no entregó una sesión válida.")
@@ -255,6 +258,12 @@ def solarman_post(path: str, payload: dict, token: str | None = None) -> dict:
         detail = ""
         if isinstance(parsed, dict):
             detail = parsed.get("msg") or parsed.get("message") or parsed.get("error") or ""
+        known = {
+            "2101022": "la cuenta requiere un orgId/empresa o el AppId no corresponde al tipo de cuenta",
+            "2101023": "acceso denegado para este AppId o usuario",
+            "2101025": "autenticación fallida; revisa AppId, AppSecret, correo y hash SHA-256",
+        }
+        detail = known.get(code, detail)
         suffix = f": {detail}" if detail else ""
         raise SolarManError(f"SOLARMAN devolvió un error de consulta (código {code}){suffix}.")
     return parsed
