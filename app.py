@@ -52,7 +52,10 @@ LOGIN_WINDOW_SECONDS = 15 * 60
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_ATTEMPTS: dict[str, list[float]] = defaultdict(list)
 LOGIN_LOCK = threading.Lock()
-FUSIONSOLAR_CACHE_SECONDS = 5 * 60
+# FusionSolar limita las cuentas Northbound a pocas llamadas por ventana de
+# tiempo. Conservamos plantas y reportes durante 10 minutos para evitar que
+# refrescos repetidos provoquen el failCode 407.
+FUSIONSOLAR_CACHE_SECONDS = 10 * 60
 FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None, "reports": {}}
 FUSIONSOLAR_LOCK = threading.Lock()
 FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
