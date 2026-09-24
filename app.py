@@ -575,11 +575,11 @@ def fusionsolar_overview() -> list[dict]:
         cached = FUSIONSOLAR_CACHE.get("overview")
         if cached is not None and now < float(FUSIONSOLAR_CACHE["overviewExpires"]):
             return cached
+        # Reutiliza el listado de estaciones que alimenta los reportes. Volver
+        # a llamar getStationList aquí era redundante y podía provocar el 407
+        # aunque los reportes siguieran funcionando con la lista en caché.
+        plants = fusionsolar_plants()
         base_url, opener, token = fusionsolar_authenticated_client()
-        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
-        if not isinstance(stations_response, dict) or not stations_response.get("success"):
-            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
-        plants = station_list(stations_response)
         codes = [plant["code"] for plant in plants if plant["code"]]
         if not codes:
             return plants
