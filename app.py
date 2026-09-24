@@ -406,7 +406,11 @@ def fusionsolar_authenticated_client():
         opener, f"{base_url}/thirdData/login", {"userName": username, "systemCode": system_code}
     )
     if not isinstance(login, dict) or not login.get("success"):
-        raise FusionSolarError("FusionSolar no aceptó la cuenta API. Revisa usuario, contraseña, vigencia y permisos.")
+        code = login.get("failCode") or login.get("errorCode") or login.get("code") if isinstance(login, dict) else None
+        if str(code) == "407":
+            raise FusionSolarError("FusionSolar limitó temporalmente el inicio de sesión (código 407). Espera 10 minutos antes de reintentar.")
+        suffix = f" Código reportado: {str(code)[:40]}." if code not in {None, ""} else ""
+        raise FusionSolarError("FusionSolar no aceptó la cuenta API. Revisa usuario, contraseña, vigencia y permisos." + suffix)
     token = login_headers.get("XSRF-TOKEN")
     if not token:
         token = next((cookie.value for cookie in cookies if cookie.name.upper() == "XSRF-TOKEN"), None)
