@@ -426,6 +426,11 @@ def station_list(response: dict) -> list[dict]:
             if isinstance(raw_data.get(key), list):
                 raw_data = raw_data[key]
                 break
+        else:
+            # Algunas respuestas devuelven las estaciones indexadas por código
+            # en vez de una lista. Conservamos ese código para que la selección
+            # de varias plantas siga siendo determinista.
+            raw_data = [dict(value, stationCode=key) for key, value in raw_data.items() if isinstance(value, dict)]
     if not isinstance(raw_data, list):
         return []
     plants = []
@@ -632,7 +637,19 @@ def fusionsolar_overview() -> list[dict]:
 def report_records(response: dict) -> list[dict]:
     raw_data = response.get("data")
     if isinstance(raw_data, dict):
-        raw_data = raw_data.get("list") or raw_data.get("data") or []
+        if raw_data.get("stationCode") or raw_data.get("code"):
+            raw_data = [raw_data]
+        else:
+            nested = raw_data.get("list") or raw_data.get("data")
+            if isinstance(nested, list):
+                raw_data = nested
+            elif isinstance(nested, dict):
+                raw_data = [dict(value, stationCode=key) for key, value in nested.items() if isinstance(value, dict)]
+            else:
+                # En consultas de más de una planta FusionSolar puede devolver
+                # {"codigoPlanta": {...}} directamente. El formato de una sola
+                # planta suele ser una lista, por eso ambos casos deben aceptarse.
+                raw_data = [dict(value, stationCode=key) for key, value in raw_data.items() if isinstance(value, dict)]
     return [item for item in raw_data if isinstance(item, dict)] if isinstance(raw_data, list) else []
 
 
