@@ -57,7 +57,7 @@ LOGIN_LOCK = threading.Lock()
 # refrescos repetidos provoquen el failCode 407.
 FUSIONSOLAR_CACHE_SECONDS = 10 * 60
 FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None, "reports": {}}
-FUSIONSOLAR_LOCK = threading.Lock()
+FUSIONSOLAR_LOCK = threading.RLock()
 FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
 SOLISCLOUD_USER_AGENT = "MLY-SolarOps/1.0 (read-only)"
 SOLISCLOUD_CACHE_SECONDS = 5 * 60
@@ -658,11 +658,8 @@ def fusionsolar_daily_report(report_date: date, selected_codes: list[str] | None
         cached = FUSIONSOLAR_CACHE["reports"].get(cache_key)
         if cached and now < cached["expires"]:
             return cached["data"]
+        plants = selected_fusionsolar_plants(fusionsolar_plants(), selected_codes)
         base_url, opener, token = fusionsolar_authenticated_client()
-        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
-        if not isinstance(stations_response, dict) or not stations_response.get("success"):
-            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
-        plants = selected_fusionsolar_plants(station_list(stations_response), selected_codes)
         codes = [plant["code"] for plant in plants if plant["code"]]
         if not codes:
             return {"date": cache_key, "plants": []}
@@ -745,11 +742,8 @@ def fusionsolar_range_report(start_date: date, end_date: date, selected_codes: l
         cached = FUSIONSOLAR_CACHE["reports"].get(cache_key)
         if cached and now < cached["expires"]:
             return cached["data"]
+        plants = selected_fusionsolar_plants(fusionsolar_plants(), selected_codes)
         base_url, opener, token = fusionsolar_authenticated_client()
-        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
-        if not isinstance(stations_response, dict) or not stations_response.get("success"):
-            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
-        plants = selected_fusionsolar_plants(station_list(stations_response), selected_codes)
         codes = [plant["code"] for plant in plants if plant["code"]]
         if not codes:
             return {"startDate": start_date.isoformat(), "endDate": end_date.isoformat(), "plants": []}
