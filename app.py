@@ -56,7 +56,7 @@ LOGIN_LOCK = threading.Lock()
 # tiempo. Conservamos plantas y reportes durante 10 minutos para evitar que
 # refrescos repetidos provoquen el failCode 407.
 FUSIONSOLAR_CACHE_SECONDS = 10 * 60
-FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None, "reports": {}}
+FUSIONSOLAR_CACHE: dict[str, object] = {"expires": 0.0, "plants": None, "overviewExpires": 0.0, "overview": None, "reports": {}, "client": None, "clientExpires": 0.0}
 FUSIONSOLAR_LOCK = threading.RLock()
 FUSIONSOLAR_USER_AGENT = "Mozilla/5.0 (compatible; AnalisisPlantasFV/1.0; read-only)"
 SOLISCLOUD_USER_AGENT = "MLY-SolarOps/1.0 (read-only)"
@@ -394,7 +394,12 @@ def prepare_fusionsolar_session(opener, base_url: str) -> None:
 
 
 def fusionsolar_authenticated_client():
-    """Abre una sesión temporal de API para consultas de solo lectura."""
+    """Reutiliza una sesión temporal para no volver a iniciar sesión en cada consulta."""
+    now = time.time()
+    with FUSIONSOLAR_LOCK:
+        cached_client = FUSIONSOLAR_CACHE.get("client")
+        if cached_client is not None and now < float(FUSIONSOLAR_CACHE.get("clientExpires", 0.0)):
+            return cached_client
     base_url, username, system_code = fusionsolar_configuration()
     cookies = CookieJar()
     tls_context = ssl.create_default_context()
@@ -416,7 +421,13 @@ def fusionsolar_authenticated_client():
         token = next((cookie.value for cookie in cookies if cookie.name.upper() == "XSRF-TOKEN"), None)
     if not token:
         raise FusionSolarError("FusionSolar no entregó una sesión válida. Revisa que las Interfaces API básicas sigan activas.")
-    return base_url, opener, token
+    client = (base_url, opener, token)
+    with FUSIONSOLAR_LOCK:
+        # La sesión/cookie de FusionSolar suele ser válida más tiempo, pero
+        # renovamos antes de 10 minutos para no usar una sesión vencida.
+        FUSIONSOLAR_CACHE["client"] = client
+        FUSIONSOLAR_CACHE["clientExpires"] = time.time() + FUSIONSOLAR_CACHE_SECONDS
+    return client
 
 
 def station_list(response: dict) -> list[dict]:
@@ -462,10 +473,19 @@ def fusionsolar_plants() -> list[dict]:
         cached = FUSIONSOLAR_CACHE.get("plants")
         if cached is not None and now < float(FUSIONSOLAR_CACHE["expires"]):
             return cached
-        base_url, opener, token = fusionsolar_authenticated_client()
-        response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
-        if not isinstance(response, dict) or not response.get("success"):
-            raise fusionsolar_station_list_error(response)
+        try:
+            base_url, opener, token = fusionsolar_authenticated_client()
+            response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
+            if not isinstance(response, dict) or not response.get("success"):
+                raise fusionsolar_station_list_error(response)
+        except FusionSolarError as error:
+            # Si el proveedor limita temporalmente el listado, una lista
+            # autorizada previamente sigue siendo válida para reportes.
+            stale = FUSIONSOLAR_CACHE.get("plants")
+            if stale is not None and "407" in str(error):
+                FUSIONSOLAR_CACHE["expires"] = now + FUSIONSOLAR_CACHE_SECONDS
+                return stale
+            raise
         plants = station_list(response)
         FUSIONSOLAR_CACHE["plants"] = plants
         FUSIONSOLAR_CACHE["expires"] = now + FUSIONSOLAR_CACHE_SECONDS
@@ -575,11 +595,8 @@ def fusionsolar_overview() -> list[dict]:
         cached = FUSIONSOLAR_CACHE.get("overview")
         if cached is not None and now < float(FUSIONSOLAR_CACHE["overviewExpires"]):
             return cached
+        plants = fusionsolar_plants()
         base_url, opener, token = fusionsolar_authenticated_client()
-        stations_response, _ = fusionsolar_post(opener, f"{base_url}/thirdData/getStationList", {}, token)
-        if not isinstance(stations_response, dict) or not stations_response.get("success"):
-            raise FusionSolarError("No fue posible obtener las plantas autorizadas desde FusionSolar.")
-        plants = station_list(stations_response)
         codes = [plant["code"] for plant in plants if plant["code"]]
         if not codes:
             return plants
