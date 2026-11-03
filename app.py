@@ -1754,7 +1754,8 @@ class Handler(SimpleHTTPRequestHandler):
             if self.require_auth():
                 self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
             return
-        if route in {"/api/quotes", "/api/quotes/template"}:
+        quote_update_match = re.fullmatch(r"/api/quotes/([a-f0-9]{32})/update", route)
+        if route in {"/api/quotes", "/api/quotes/template"} or quote_update_match:
             if not self.require_auth({"admin"}):
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -1781,7 +1782,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
-                result = quote_store.create_quote(payload, self.current_user()["username"])
+                if quote_update_match:
+                    result = quote_store.update_quote(quote_update_match.group(1), payload, self.current_user()["username"])
+                else:
+                    result = quote_store.create_quote(payload, self.current_user()["username"])
             except (UnicodeDecodeError, json.JSONDecodeError):
                 self.send_json({"error": "Los datos de la cotización no tienen un formato válido."}, HTTPStatus.BAD_REQUEST)
                 return

@@ -201,7 +201,7 @@ def bootstrap() -> dict:
     return {"ready": bool(clients and products), "storage": "google_sheets", "templateLoadedAt": "Google Drive", "sequence": max_sequence + 1, "company": company, "defaults": defaults, "options": options, "clients": clients, "products": products, "quotes": quotes[-200:][::-1]}
 
 
-def append_quote(quote: dict) -> None:
+def _quote_rows(quote: dict) -> tuple[list, list[list]]:
     client, project, system, conditions, totals = quote["client"], quote["project"], quote["system"], quote["conditions"], quote["totals"]
     registry_row = [quote["id"], quote["number"], quote["createdAt"], quote["date"], quote["validityDays"], quote["validUntil"], client["id"], client["name"], client["documentType"], client["document"], client["dv"], client["phone"], client["email"], client["city"], client["address"], project.get("location", ""), project.get("systemType", ""), project.get("advisor", ""), conditions.get("scope", ""), conditions.get("payment", ""), conditions.get("delivery", ""), conditions.get("warranty", ""), conditions.get("transport", ""), conditions.get("included", ""), conditions.get("excluded", ""), conditions.get("notes", ""), system.get("pvKwp", ""), system.get("panelW", ""), system.get("panels", ""), system.get("inverterKw", ""), system.get("batteryKwh", ""), system.get("generationKwhMonth", ""), system.get("consumptionKwhMonth", ""), system.get("coveragePercent", ""), totals["subtotal"], totals["discounts"], totals["iva"], totals["aiu"], totals["totalWithoutIva"], totals["total"], quote["status"]]
     numeric_registry = {4, *range(26, 40)}
@@ -211,7 +211,17 @@ def append_quote(quote: dict) -> None:
         values = [quote["id"], quote["number"], item["line"], item["code"], item["description"], item["brand"], item["unit"], item["quantity"], item["unitPrice"], item["discount"], item["base"], item["ivaRate"], item["iva"], item["total"]]
         numeric_detail = {2, *range(7, 14)}
         detail_rows.append([_num(value) if index in numeric_detail and value not in (None, "") else value for index, value in enumerate(values)])
+    return registry_row, detail_rows
+
+
+def append_quote(quote: dict) -> None:
+    registry_row, detail_rows = _quote_rows(quote)
     _call("append_quote", registry_row=registry_row, detail_rows=detail_rows)
+
+
+def update_quote(quote: dict) -> None:
+    registry_row, detail_rows = _quote_rows(quote)
+    _call("update_quote", registry_row=registry_row, detail_rows=detail_rows)
 
 
 def get_quote(quote_id: str) -> dict | None:

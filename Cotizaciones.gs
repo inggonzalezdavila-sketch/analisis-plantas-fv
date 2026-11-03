@@ -17,6 +17,8 @@ function doPost(e) {
       result = {values: readRange_(spreadsheet, String(request.range || ""))};
     } else if (request.action === "append_quote") {
       result = appendQuote_(spreadsheet, request);
+    } else if (request.action === "update_quote") {
+      result = updateQuote_(spreadsheet, request);
     } else {
       throw new Error("La operación solicitada no está disponible.");
     }
@@ -113,6 +115,67 @@ function appendQuote_(spreadsheet, request) {
     });
     SpreadsheetApp.flush();
     throw new Error("Google Sheets no pudo completar el registro de la cotización.");
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateQuote_(spreadsheet, request) {
+  var registry = spreadsheet.getSheetByName("Registro_Cotizaciones");
+  var details = spreadsheet.getSheetByName("Detalle_Cotizaciones");
+  if (!registry || !details) throw new Error("Faltan las pestañas Registro_Cotizaciones o Detalle_Cotizaciones.");
+  var registryRow = request.registry_row;
+  var detailRows = request.detail_rows;
+  if (!Array.isArray(registryRow) || registryRow.length !== 41 || !registryRow[0] || !Array.isArray(detailRows) || !detailRows.length) {
+    throw new Error("Los datos de la cotización están incompletos.");
+  }
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  var oldRegistry = null;
+  var oldDetails = [];
+  var appendedRows = [];
+  try {
+    var lastRegistryRow = registry.getLastRow();
+    if (lastRegistryRow < 5) throw new Error("La cotización ya no existe en el registro.");
+    var registryIds = registry.getRange(5, 1, lastRegistryRow - 4, 1).getValues();
+    var registryIndex = registryIds.findIndex(function(row) { return String(row[0]) === String(registryRow[0]); });
+    if (registryIndex < 0) throw new Error("La cotización ya no existe en el registro.");
+    var targetRegistryRow = registryIndex + 5;
+    oldRegistry = registry.getRange(targetRegistryRow, 1, 1, 41).getValues()[0];
+
+    var lastDetailRow = details.getLastRow();
+    if (lastDetailRow >= 5) {
+      var detailIds = details.getRange(5, 1, lastDetailRow - 4, 1).getValues();
+      detailIds.forEach(function(row, index) {
+        if (String(row[0]) === String(registryRow[0])) {
+          var rowNumber = index + 5;
+          oldDetails.push({row: rowNumber, values: details.getRange(rowNumber, 1, 1, 14).getValues()[0]});
+        }
+      });
+    }
+    if (!oldDetails.length) throw new Error("No se encontraron los ítems de la cotización para actualizarlos.");
+
+    registry.getRange(targetRegistryRow, 1, 1, 41).setValues([registryRow]);
+    var reused = Math.min(oldDetails.length, detailRows.length);
+    for (var i = 0; i < reused; i++) {
+      details.getRange(oldDetails[i].row, 1, 1, 14).setValues([detailRows[i]]);
+    }
+    for (var j = reused; j < detailRows.length; j++) {
+      var appendRow = Math.max(5, details.getLastRow() + 1);
+      details.getRange(appendRow, 1, 1, 14).setValues([detailRows[j]]);
+      appendedRows.push(appendRow);
+    }
+    for (var k = detailRows.length; k < oldDetails.length; k++) {
+      details.getRange(oldDetails[k].row, 1, 1, 14).clearContent();
+    }
+    SpreadsheetApp.flush();
+    return {saved: true, updated: true};
+  } catch (error) {
+    if (oldRegistry) registry.getRange(targetRegistryRow, 1, 1, 41).setValues([oldRegistry]);
+    oldDetails.forEach(function(item) { details.getRange(item.row, 1, 1, 14).setValues([item.values]); });
+    appendedRows.forEach(function(row) { details.getRange(row, 1, 1, 14).clearContent(); });
+    SpreadsheetApp.flush();
+    throw error;
   } finally {
     lock.releaseLock();
   }

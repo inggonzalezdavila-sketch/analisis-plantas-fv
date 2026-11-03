@@ -314,7 +314,7 @@ def _quote_record(sequence: int, quote_date: str, parsed_date: date, validity: i
     }
 
 
-def create_quote(payload: dict, created_by: str) -> dict:
+def create_quote(payload: dict, created_by: str, quote_id: str | None = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("La cotización no tiene un formato válido.")
     client = payload.get("client") or {}
@@ -386,9 +386,22 @@ def create_quote(payload: dict, created_by: str) -> dict:
             remote = google_sheets.bootstrap()
             if not remote["ready"]:
                 raise ValueError("La hoja de Google Drive no tiene clientes y productos activos en la plantilla MLY.")
-            sequence = int(remote["sequence"])
+            previous = google_sheets.get_quote(quote_id) if quote_id else None
+            if quote_id and previous is None:
+                raise ValueError("La cotización que intentas editar ya no existe.")
+            if previous:
+                match = re.search(r"(\d+)$", previous.get("number", ""))
+                if not match:
+                    raise ValueError("No se pudo conservar el consecutivo de esta cotización.")
+                sequence = int(match.group(1))
+            else:
+                sequence = int(remote["sequence"])
             full = _quote_record(sequence, quote_date, parsed_date, validity, client_fields, project, system, conditions, cleaned_items, gross, discounts, iva_total, aiu, total_without_iva, total, status, created_by)
-            google_sheets.append_quote(full)
+            if previous:
+                full.update({"id": previous["id"], "number": previous["number"], "createdAt": previous["createdAt"], "createdBy": previous.get("createdBy", "")})
+                google_sheets.update_quote(full)
+            else:
+                google_sheets.append_quote(full)
             return full
 
     initialise()
@@ -397,9 +410,27 @@ def create_quote(payload: dict, created_by: str) -> dict:
         settings = db.execute("SELECT value FROM quote_settings WHERE key='template_loaded_at'").fetchone()
         if not settings:
             raise ValueError("Carga primero tu plantilla MLY de cotizaciones para usar los clientes y productos.")
-        sequence = int(db.execute("SELECT value FROM quote_settings WHERE key='sequence'").fetchone()[0]) + 1
+        previous = None
+        if quote_id:
+            existing = db.execute("SELECT * FROM quotes WHERE id=?", (quote_id,)).fetchone()
+            if not existing:
+                raise ValueError("La cotización que intentas editar ya no existe.")
+            previous = json.loads(existing["payload"])
+            match = re.search(r"(\d+)$", existing["number"])
+            if not match:
+                raise ValueError("No se pudo conservar el consecutivo de esta cotización.")
+            sequence = int(match.group(1))
+        else:
+            sequence = int(db.execute("SELECT value FROM quote_settings WHERE key='sequence'").fetchone()[0]) + 1
         number = f"COT-{sequence:04d}"
         full = _quote_record(sequence, quote_date, parsed_date, validity, client_fields, project, system, conditions, cleaned_items, gross, discounts, iva_total, aiu, total_without_iva, total, status, created_by)
+        if previous:
+            full.update({"id": previous["id"], "number": previous["number"], "createdAt": previous["createdAt"], "createdBy": previous.get("createdBy", "")})
+            number = previous["number"]
+            db.execute("UPDATE quotes SET quote_date=?,client_name=?,project=?,total=?,status=?,payload=? WHERE id=?", (
+                quote_date, client_fields["name"], project.get("location", ""), _money(total), status, json.dumps(full, ensure_ascii=False), quote_id,
+            ))
+            return full
         quote_id = full["id"]
         created_at = full["createdAt"]
         db.execute("INSERT INTO quotes(id,number,created_at,quote_date,client_name,project,total,status,payload) VALUES(?,?,?,?,?,?,?,?,?)", (
@@ -407,6 +438,10 @@ def create_quote(payload: dict, created_by: str) -> dict:
         ))
         db.execute("UPDATE quote_settings SET value=? WHERE key='sequence'", (str(sequence),))
     return full
+
+
+def update_quote(quote_id: str, payload: dict, created_by: str) -> dict:
+    return create_quote(payload, created_by, quote_id=quote_id)
 
 
 def get_quote(quote_id: str) -> dict | None:

@@ -11,6 +11,7 @@
   const editor = $('#quote-editor');
   const form = $('#quote-form');
   const itemsBody = $('#quote-items');
+  let editingQuoteId = null;
 
   const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
   const showMessage = (element, message, error = false) => {
@@ -31,7 +32,7 @@
       list.innerHTML = '<p class="quote-empty">Todavía no hay cotizaciones guardadas. Cada propuesta que guardes aparecerá aquí con su detalle.</p>';
       return;
     }
-    list.innerHTML = `<div class="quote-history-scroll"><table><thead><tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Proyecto</th><th>Total</th><th>Estado</th><th></th></tr></thead><tbody>${state.quotes.map(quote => `<tr><td><b>${escapeHtml(quote.number)}</b></td><td>${escapeHtml(dateLabel(quote.date))}</td><td>${escapeHtml(quote.client)}</td><td>${escapeHtml(quote.project || '—')}</td><td>${escapeHtml(formatCOP.format(Number(quote.total)))}</td><td><span class="quote-status">${escapeHtml(quote.status)}</span></td><td><button class="clear quote-print-button" type="button" data-print-quote="${escapeHtml(quote.id)}">Ver / imprimir</button></td></tr>`).join('')}</tbody></table></div>`;
+    list.innerHTML = `<div class="quote-history-scroll"><table><thead><tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Proyecto</th><th>Total</th><th>Estado</th><th></th></tr></thead><tbody>${state.quotes.map(quote => `<tr><td><b>${escapeHtml(quote.number)}</b></td><td>${escapeHtml(dateLabel(quote.date))}</td><td>${escapeHtml(quote.client)}</td><td>${escapeHtml(quote.project || '—')}</td><td>${escapeHtml(formatCOP.format(Number(quote.total)))}</td><td><span class="quote-status">${escapeHtml(quote.status)}</span></td><td><button class="clear quote-print-button" type="button" data-edit-quote="${escapeHtml(quote.id)}">Editar</button> <button class="clear quote-print-button" type="button" data-print-quote="${escapeHtml(quote.id)}">Ver / imprimir</button></td></tr>`).join('')}</tbody></table></div>`;
   }
 
   function dateLabel(value) {
@@ -133,9 +134,76 @@
     updateTotals();
   }
 
-  function openEditor() {
+  function setOptionValue(select, value) {
+    if (!value) return;
+    if (![...select.options].some(option => option.value === String(value))) select.add(new Option(String(value), String(value)));
+    select.value = String(value);
+  }
+
+  function openEditor(quote = null) {
     resetForm();
     populateClientSelect();
+    editingQuoteId = quote?.id || null;
+    if (quote) {
+      const { client = {}, project = {}, system = {}, conditions = {} } = quote;
+      $('#quote-editor .eyebrow').textContent = 'EDITAR PROPUESTA';
+      $('#quote-number-preview').textContent = quote.number;
+      $('#quote-save').textContent = 'Guardar cambios';
+      let clientIndex = state.clients.findIndex(entry => entry.id && entry.id === client.id);
+      if (clientIndex < 0) clientIndex = state.clients.findIndex(entry => entry.name === client.name);
+      if (clientIndex >= 0) $('#quote-client-select').value = String(clientIndex);
+      $('#quote-client-name').value = client.name || '';
+      setOptionValue($('#quote-document-type'), client.documentType);
+      $('#quote-document').value = client.document || '';
+      $('#quote-dv').value = client.dv || '';
+      $('#quote-phone').value = client.phone || '';
+      $('#quote-email').value = client.email || '';
+      $('#quote-city').value = client.city || '';
+      $('#quote-address').value = client.address || '';
+      $('#quote-project').value = project.location || '';
+      setOptionValue($('#quote-system-type'), project.systemType);
+      $('#quote-advisor').value = project.advisor || '';
+      $('#quote-date').value = String(quote.date || '').slice(0, 10);
+      $('#quote-validity').value = quote.validityDays || 15;
+      setOptionValue($('#quote-status'), quote.status || 'Borrador');
+      $('#quote-pv-kwp').value = system.pvKwp || '';
+      $('#quote-panel-w').value = system.panelW || '';
+      $('#quote-panels').value = system.panels || '';
+      $('#quote-inverter-kw').value = system.inverterKw || '';
+      $('#quote-battery-kwh').value = system.batteryKwh || '';
+      $('#quote-generation').value = system.generationKwhMonth || '';
+      $('#quote-consumption').value = system.consumptionKwhMonth || '';
+      $('#quote-coverage').value = system.coveragePercent || '';
+      $('#quote-scope').value = conditions.scope || '';
+      $('#quote-payment').value = conditions.payment || '';
+      $('#quote-delivery').value = conditions.delivery || '';
+      $('#quote-warranty').value = conditions.warranty || '';
+      $('#quote-transport').value = conditions.transport || '';
+      $('#quote-included').value = conditions.included || '';
+      $('#quote-excluded').value = conditions.excluded || '';
+      $('#quote-notes').value = conditions.notes || '';
+      $('#quote-aiu').value = quote.totals?.aiu || 0;
+      itemsBody.innerHTML = '';
+      (quote.items || []).forEach(item => {
+        const product = state.products.find(entry => entry.code === item.code && entry.name === item.description) || null;
+        addItemRow(product);
+        const row = itemsBody.lastElementChild;
+        if (product) row.querySelector('.quote-product').value = String(state.products.indexOf(product));
+        row.querySelector('.quote-code').value = item.code || '';
+        row.querySelector('.quote-description').value = item.description || '';
+        row.querySelector('.quote-brand').value = item.brand || '';
+        row.querySelector('.quote-unit').value = item.unit || '';
+        row.querySelector('.quote-quantity').value = item.quantity || 1;
+        row.querySelector('.quote-price').value = item.unitPrice || 0;
+        row.querySelector('.quote-discount').value = item.discount || 0;
+        setOptionValue(row.querySelector('.quote-iva'), item.ivaRate || 0);
+      });
+      if (!itemsBody.rows.length) addItemRow();
+      updateTotals();
+    } else {
+      $('#quote-editor .eyebrow').textContent = 'NUEVA PROPUESTA';
+      $('#quote-save').textContent = 'Guardar cotización';
+    }
     editor.hidden = false;
     editor.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -176,8 +244,8 @@
   }
 
   $('#quote-add-item').addEventListener('click', () => addItemRow());
-  newButton.addEventListener('click', openEditor);
-  $('#quote-cancel').addEventListener('click', () => { editor.hidden = true; });
+  newButton.addEventListener('click', () => openEditor());
+  $('#quote-cancel').addEventListener('click', () => { editor.hidden = true; editingQuoteId = null; });
   itemsBody.addEventListener('change', event => {
     if (!event.target.matches('.quote-product')) return;
     const product = state.products[Number(event.target.value)];
@@ -261,8 +329,10 @@
     button.disabled = true;
     showMessage(templateState, 'Guardando la cotización y todos sus ítems en el historial…');
     try {
-      const quote = await request('/api/quotes', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(readQuoteForm()) });
-      showMessage(templateState, `${quote.number} guardada correctamente.`);
+      const url = editingQuoteId ? `/api/quotes/${encodeURIComponent(editingQuoteId)}/update` : '/api/quotes';
+      const quote = await request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(readQuoteForm()) });
+      showMessage(templateState, `${quote.number} ${editingQuoteId ? 'actualizada' : 'guardada'} correctamente.`);
+      editingQuoteId = null;
       editor.hidden = true;
       await loadBootstrap();
       printQuote(quote);
@@ -274,7 +344,17 @@
   });
 
   $('#quote-history-list').addEventListener('click', async event => {
+    const editButton = event.target.closest('[data-edit-quote]');
     const button = event.target.closest('[data-print-quote]');
+    if (editButton) {
+      try {
+        const quote = await request(`/api/quotes/${encodeURIComponent(editButton.dataset.editQuote)}`);
+        openEditor(quote);
+      } catch (error) {
+        showMessage(templateState, error.message, true);
+      }
+      return;
+    }
     if (!button) return;
     try {
       const quote = await request(`/api/quotes/${encodeURIComponent(button.dataset.printQuote)}`);
