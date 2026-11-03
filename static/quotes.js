@@ -31,7 +31,7 @@
       list.innerHTML = '<p class="quote-empty">Todavía no hay cotizaciones guardadas. Cada propuesta que guardes aparecerá aquí con su detalle.</p>';
       return;
     }
-    list.innerHTML = `<div class="quote-history-scroll"><table><thead><tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Proyecto</th><th>Total</th><th>Estado</th><th></th></tr></thead><tbody>${state.quotes.map(quote => `<tr><td><b>${escapeHtml(quote.number)}</b></td><td>${escapeHtml(dateLabel(quote.date))}</td><td>${escapeHtml(quote.client)}</td><td>${escapeHtml(quote.project || '—')}</td><td>${escapeHtml(formatCOP(Number(quote.total)))}</td><td><span class="quote-status">${escapeHtml(quote.status)}</span></td><td><button class="clear quote-print-button" type="button" data-print-quote="${escapeHtml(quote.id)}">Ver / imprimir</button></td></tr>`).join('')}</tbody></table></div>`;
+    list.innerHTML = `<div class="quote-history-scroll"><table><thead><tr><th>Número</th><th>Fecha</th><th>Cliente</th><th>Proyecto</th><th>Total</th><th>Estado</th><th></th></tr></thead><tbody>${state.quotes.map(quote => `<tr><td><b>${escapeHtml(quote.number)}</b></td><td>${escapeHtml(dateLabel(quote.date))}</td><td>${escapeHtml(quote.client)}</td><td>${escapeHtml(quote.project || '—')}</td><td>${escapeHtml(formatCOP.format(Number(quote.total)))}</td><td><span class="quote-status">${escapeHtml(quote.status)}</span></td><td><button class="clear quote-print-button" type="button" data-print-quote="${escapeHtml(quote.id)}">Ver / imprimir</button></td></tr>`).join('')}</tbody></table></div>`;
   }
 
   function dateLabel(value) {
