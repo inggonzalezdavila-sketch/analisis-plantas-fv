@@ -10,3 +10,5 @@ services:
         value: 0.0.0.0
       - key: MAX_UPLOAD_MB
         value: "50"
+      - key: QUOTE_STORAGE_BACKEND
+        value: apps_script

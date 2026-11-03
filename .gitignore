@@ -2,9 +2,14 @@
 data/*.xlsx
 data/*.xls
 data/*.csv
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal
 
 # Configuración local y archivos temporales.
 .env
+*service-account*.json
+*google-credentials*.json
 __pycache__/
 *.py[cod]
 .artifact_build/

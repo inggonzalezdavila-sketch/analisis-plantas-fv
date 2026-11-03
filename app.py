@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import ssl
 import sys
 import tempfile
@@ -35,6 +36,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 from xml.etree import ElementTree as ET
+
+import quotes as quote_store
+import google_sheets
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -1581,6 +1585,31 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if not self.require_auth():
             return
+        if route == "/api/quotes":
+            if not self.require_auth({"admin"}):
+                return
+            try:
+                self.send_json(quote_store.bootstrap())
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if route.startswith("/api/quotes/"):
+            if not self.require_auth({"admin"}):
+                return
+            quote_id = route.removeprefix("/api/quotes/")
+            if not re.fullmatch(r"[a-f0-9]{32}", quote_id):
+                self.send_json({"error": "La cotización solicitada no existe."}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                quote = quote_store.get_quote(quote_id)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            if quote is None:
+                self.send_json({"error": "La cotización solicitada no existe."}, HTTPStatus.NOT_FOUND)
+            else:
+                self.send_json(quote)
+            return
         if route == "/api/dashboard":
             # No analizar un listado mientras otra petición está sustituyendo los archivos.
             with DATA_LOCK:
@@ -1724,6 +1753,48 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/logout":
             if self.require_auth():
                 self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
+            return
+        if route in {"/api/quotes", "/api/quotes/template"}:
+            if not self.require_auth({"admin"}):
+                return
+            content_length = int(self.headers.get("Content-Length", "0"))
+            maximum = min(MAX_UPLOAD_BYTES, 15 * 1024 * 1024 + 1024 * 1024)
+            if not 0 < content_length <= maximum:
+                self.send_json({"error": "El contenido de la cotización está vacío o supera el límite permitido."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            raw_body = self.rfile.read(content_length)
+            if route == "/api/quotes/template":
+                content_type = self.headers.get("Content-Type", "")
+                uploads = multipart_uploads(content_type, raw_body) if "multipart/form-data" in content_type else []
+                if not uploads or not (uploads[0].filename or "").lower().endswith(".xlsx"):
+                    self.send_json({"error": "Selecciona la plantilla de cotizaciones MLY en formato XLSX."}, HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    result = quote_store.import_template(uploads[0].file.read())
+                except (ValueError, KeyError, OSError, ET.ParseError, zipfile.BadZipFile) as error:
+                    self.send_json({"error": str(error) or "No se pudo leer la plantilla MLY."}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                    return
+                except sqlite3.Error:
+                    self.send_json({"error": "No se pudo guardar el catálogo de la plantilla. Verifica el almacenamiento de cotizaciones."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                    return
+                self.send_json({"message": "Plantilla cargada. Clientes y productos listos para cotizar.", **result}, HTTPStatus.CREATED)
+                return
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                result = quote_store.create_quote(payload, self.current_user()["username"])
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.send_json({"error": "Los datos de la cotización no tienen un formato válido."}, HTTPStatus.BAD_REQUEST)
+                return
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            except (sqlite3.Error, OSError) as error:
+                self.send_json({"error": "No fue posible guardar la cotización. Revisa el almacenamiento de la aplicación."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self.send_json(result, HTTPStatus.CREATED)
             return
         if route not in {"/api/upload", "/api/simulation/upload"}:
             self.send_error(HTTPStatus.NOT_FOUND)
