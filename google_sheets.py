@@ -177,6 +177,12 @@ def _product_rows() -> list[dict]:
     return products
 
 
+def add_product(product: dict) -> dict:
+    result = _call("add_product", product=product)
+    saved = result.get("product")
+    return saved if isinstance(saved, dict) else product
+
+
 def bootstrap() -> dict:
     required = {"Clientes", "Productos_Servicios", "Configuracion", "Cotizacion", "Registro_Cotizaciones", "Detalle_Cotizaciones"}
     missing = sorted(required - _sheet_names())

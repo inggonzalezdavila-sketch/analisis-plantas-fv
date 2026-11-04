@@ -35,3 +35,8 @@
 .quote-empty{margin:0;padding:18px;border:1px dashed #c9d9cf;border-radius:9px;color:var(--muted);font-size:13px}
 @media(max-width:850px){.quote-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.quote-technical-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.quote-totals{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:600px){.quote-editor{padding:15px}.quote-form-grid,.quote-technical-grid,.quote-conditions-grid{grid-template-columns:1fr}.quote-form-grid .wide{grid-column:auto}.quote-totals{grid-template-columns:1fr 1fr}.quote-totals .quote-total{grid-column:1/-1;padding:8px 0 0;border-left:0;border-top:2px solid #efb51c}.quote-form-actions{align-items:stretch;flex-direction:column}.quote-form-actions .analyse{width:100%}.quote-editor-heading{align-items:flex-start}.quote-toolbar{align-items:stretch}.quote-toolbar .upload,.quote-toolbar .analyse{width:100%;text-align:center}}
+
+.quote-product-editor{margin-top:12px;padding:13px;border:1px solid var(--line);border-radius:8px;background:#f7faf8}
+.quote-product-editor>p{margin:0 0 10px;color:var(--muted);font-size:12px}
+.quote-product-editor fieldset{margin:0;padding:0;border:0}
+.quote-product-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}

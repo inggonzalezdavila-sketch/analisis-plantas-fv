@@ -57,6 +57,9 @@
     updateOptions('#quote-document-type', data.options?.documentTypes, ['CC', 'NIT', 'CE', 'PASAPORTE']);
     updateOptions('#quote-system-type', data.options?.systemTypes, ['ON GRID', 'OFF GRID', 'HÍBRIDO', 'MANTENIMIENTO', 'OTRO']);
     updateOptions('#quote-status', data.options?.statuses, ['Borrador', 'Enviada', 'Aprobada', 'Rechazada', 'Vencida']);
+    const ivaRates = data.options?.ivaRates?.length ? data.options.ivaRates.map(Number) : [0, 0.05, 0.19];
+    $('#quote-product-iva').innerHTML = [...new Set(ivaRates)].sort((a, b) => a - b).map(rate => `<option value="${rate}">${escapeHtml(formatNumber.format(rate * 100))}%</option>`).join('');
+    $('#quote-product-iva').value = String(ivaRates.includes(0.19) ? 0.19 : ivaRates[ivaRates.length - 1]);
     renderHistory();
     if (data.ready) {
       if (driveStorage) {
@@ -244,6 +247,41 @@
   }
 
   $('#quote-add-item').addEventListener('click', () => addItemRow());
+  $('#quote-new-product').addEventListener('click', () => {
+    $('#quote-product-editor').hidden = false;
+    $('#quote-product-fields').disabled = false;
+    $('#quote-product-name').focus();
+  });
+  $('#quote-product-cancel').addEventListener('click', () => {
+    $('#quote-product-editor').hidden = true;
+    $('#quote-product-fields').disabled = true;
+  });
+  $('#quote-product-save').addEventListener('click', async () => {
+    const saveButton = $('#quote-product-save');
+    const payload = {
+      type: $('#quote-product-type').value, code: $('#quote-product-code').value.trim(),
+      name: $('#quote-product-name').value.trim(), brand: $('#quote-product-brand').value.trim(),
+      unit: $('#quote-product-unit').value.trim(), price: $('#quote-product-price').value, ivaRate: $('#quote-product-iva').value,
+    };
+    if (!payload.name) { showMessage(templateState, 'Escribe la descripción del equipo o servicio.', true); return; }
+    saveButton.disabled = true;
+    showMessage(templateState, 'Guardando el artículo en el catálogo de Google Drive…');
+    try {
+      const product = await request('/api/quotes/products', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      state.products.push(product);
+      addItemRow(product);
+      updateTotals();
+      $('#quote-product-code').value = ''; $('#quote-product-name').value = ''; $('#quote-product-brand').value = ''; $('#quote-product-unit').value = '';
+      $('#quote-product-type').value = 'Equipo';
+      $('#quote-product-price').value = '0';
+      $('#quote-product-iva').value = String(state.options?.ivaRates?.map(Number).includes(0.19) ? 0.19 : $('#quote-product-iva').options[0]?.value || 0);
+      $('#quote-product-editor').hidden = true;
+      $('#quote-product-fields').disabled = true;
+      showMessage(templateState, product.name + ' se añadió a la cotización y al catálogo de Drive.');
+    } catch (error) {
+      showMessage(templateState, error.message, true);
+    } finally { saveButton.disabled = false; }
+  });
   newButton.addEventListener('click', () => openEditor());
   $('#quote-cancel').addEventListener('click', () => { editor.hidden = true; editingQuoteId = null; });
   itemsBody.addEventListener('change', event => {

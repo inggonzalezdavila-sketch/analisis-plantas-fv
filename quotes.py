@@ -314,6 +314,35 @@ def _quote_record(sequence: int, quote_date: str, parsed_date: date, validity: i
     }
 
 
+def add_product(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Los datos del artículo no tienen un formato válido.")
+    kind = _text(payload.get("type")).strip().title()
+    if kind not in {"Equipo", "Servicio"}:
+        raise ValueError("Selecciona si el artículo es un equipo o un servicio.")
+    name = _text(payload.get("name"))[:500]
+    if not name:
+        raise ValueError("Escribe la descripción del equipo o servicio.")
+    price = _decimal(payload.get("price"), "precio unitario")
+    iva_rate = _decimal(payload.get("ivaRate", 0.19), "IVA", maximum=Decimal("1"))
+    product = {
+        "code": _text(payload.get("code"))[:80] or "WEB-" + uuid.uuid4().hex[:8].upper(),
+        "type": kind, "name": name, "brand": _text(payload.get("brand"))[:160],
+        "unit": _text(payload.get("unit"))[:40], "price": _money(price), "ivaRate": str(iva_rate),
+    }
+    if _google_mode():
+        import google_sheets
+        with google_sheets.WRITE_LOCK:
+            return google_sheets.add_product(product)
+    initialise()
+    try:
+        with connect() as db:
+            db.execute("INSERT INTO quote_products(code,name,payload) VALUES(?,?,?)", (product["code"], product["name"], json.dumps(product, ensure_ascii=False)))
+    except sqlite3.IntegrityError:
+        raise ValueError("Ya existe un artículo con ese código. Usa otro código o déjalo vacío para asignar uno automáticamente.") from None
+    return product
+
+
 def create_quote(payload: dict, created_by: str, quote_id: str | None = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("La cotización no tiene un formato válido.")

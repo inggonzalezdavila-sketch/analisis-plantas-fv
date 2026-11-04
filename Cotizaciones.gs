@@ -19,6 +19,8 @@ function doPost(e) {
       result = appendQuote_(spreadsheet, request);
     } else if (request.action === "update_quote") {
       result = updateQuote_(spreadsheet, request);
+    } else if (request.action === "add_product") {
+      result = addProduct_(spreadsheet, request.product);
     } else {
       throw new Error("La operación solicitada no está disponible.");
     }
@@ -176,6 +178,47 @@ function updateQuote_(spreadsheet, request) {
     appendedRows.forEach(function(row) { details.getRange(row, 1, 1, 14).clearContent(); });
     SpreadsheetApp.flush();
     throw error;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+function normalizeProductHeader_(value) {
+  return String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]/g, "");
+}
+
+function addProduct_(spreadsheet, product) {
+  if (!product || !product.code || !product.name) throw new Error("El equipo o servicio necesita código y descripción.");
+  var sheet = spreadsheet.getSheetByName("Productos_Servicios");
+  if (!sheet) throw new Error("No existe la pestaña Productos_Servicios.");
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var headers = sheet.getRange(5, 1, 1, 11).getValues()[0];
+    var indexes = {};
+    headers.forEach(function(header, index) { indexes[normalizeProductHeader_(header)] = index; });
+    var codeIndex = indexes.codigo;
+    var nameIndex = indexes.descripcion;
+    if (codeIndex === undefined || nameIndex === undefined) throw new Error("No se encontraron las columnas Código y Descripción en Productos_Servicios.");
+    var lastRow = sheet.getLastRow();
+    if (lastRow >= 6) {
+      var codes = sheet.getRange(6, codeIndex + 1, lastRow - 5, 1).getValues();
+      if (codes.some(function(row) { return String(row[0] || "").trim().toLowerCase() === String(product.code).trim().toLowerCase(); })) {
+        throw new Error("Ya existe un artículo con ese código. Usa otro código o déjalo vacío para asignar uno automáticamente.");
+      }
+    }
+    var values = {
+      codigo: String(product.code), tipo: String(product.type || "Equipo"), descripcion: String(product.name),
+      marcamodelo: String(product.brand || ""), marca: String(product.brand || ""), modelo: String(product.brand || ""),
+      unidad: String(product.unit || ""), precioventa: Number(product.price || 0), precio: Number(product.price || 0),
+      tasaiva: Number(product.ivaRate || 0), iva: Number(product.ivaRate || 0), activo: "Sí", activa: "Sí", estado: "Activo"
+    };
+    var row = headers.map(function(header) { return values[normalizeProductHeader_(header)] ?? ""; });
+    var nextRow = Math.max(6, lastRow + 1);
+    sheet.getRange(nextRow, 1, 1, 11).setValues([row]);
+    SpreadsheetApp.flush();
+    return {product: product};
   } finally {
     lock.releaseLock();
   }

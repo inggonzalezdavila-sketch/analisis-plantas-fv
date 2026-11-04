@@ -1755,7 +1755,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
             return
         quote_update_match = re.fullmatch(r"/api/quotes/([a-f0-9]{32})/update", route)
-        if route in {"/api/quotes", "/api/quotes/template"} or quote_update_match:
+        product_add = route == "/api/quotes/products"
+        if route in {"/api/quotes", "/api/quotes/template"} or quote_update_match or product_add:
             if not self.require_auth({"admin"}):
                 return
             content_length = int(self.headers.get("Content-Length", "0"))
@@ -1782,7 +1783,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
-                if quote_update_match:
+                if product_add:
+                    result = quote_store.add_product(payload)
+                elif quote_update_match:
                     result = quote_store.update_quote(quote_update_match.group(1), payload, self.current_user()["username"])
                 else:
                     result = quote_store.create_quote(payload, self.current_user()["username"])
