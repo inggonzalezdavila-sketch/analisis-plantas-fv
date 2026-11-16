@@ -1,0 +1,47 @@
+@media print {
+  body[data-print-target="operational"] > .brand-header,
+  body[data-print-target="fusion-daily"] > .brand-header,
+  body[data-print-target="fusion-range"] > .brand-header,
+  body[data-print-target="simulation"] > .brand-header {
+    display: none !important;
+  }
+
+  body[data-print-target="operational"] > #operational-report,
+  body[data-print-target="fusion-daily"] > #fusionsolar-report-panel,
+  body[data-print-target="fusion-range"] > #fusionsolar-report-panel,
+  body[data-print-target="simulation"] > #simulation-panel {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+    color: #15221d !important;
+  }
+
+  body[data-print-target="fusion-daily"] #fusionsolar-report-panel > :not(#fusionsolar-report-analysis),
+  body[data-print-target="fusion-range"] #fusionsolar-report-panel > :not(#fusionsolar-range-analysis),
+  body[data-print-target="simulation"] #simulation-panel > :not(#simulation-analysis) {
+    display: none !important;
+  }
+
+  body[data-print-target="fusion-daily"] #fusionsolar-report-analysis,
+  body[data-print-target="fusion-range"] #fusionsolar-range-analysis,
+  body[data-print-target="simulation"] #simulation-analysis {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+    color: #15221d !important;
+  }
+
+  body[data-print-target] .report-document-heading button {
+    display: none !important;
+  }
+}
