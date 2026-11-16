@@ -10,6 +10,9 @@
   let items = [];
   let isAdmin = false;
   let editingId = '';
+  let lightboxPhotos = [];
+  let lightboxIndex = 0;
+  let renderedCards = [];
 
   function escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]));
@@ -34,6 +37,33 @@
       : `/api/gallery/${encodeURIComponent(item.id)}/image?variant=thumbnail`;
   }
 
+  function groupForDisplay(source) {
+    const groups = new Map();
+    for (const item of source) {
+      const match = item.title.match(/^(.*)\s+(\d+)$/);
+      const baseTitle = match ? match[1].trim() : item.title;
+      const key = match
+        ? `${baseTitle.toLocaleLowerCase('es')}|${item.category}|${item.location}|${item.description}`
+        : `single|${item.id}`;
+      if (!groups.has(key)) groups.set(key, {baseTitle, numbered: Boolean(match), photos: []});
+      groups.get(key).photos.push(item);
+    }
+    return [...groups.values()].flatMap(group => {
+      const photos = group.photos.sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+      const grouped = group.numbered && photos.length > 1;
+      return [{
+        id: photos.find(photo => photo.isCover)?.id || photos.find(photo => photo.published)?.id || photos[0].id,
+        title: grouped ? group.baseTitle : photos[0].title,
+        category: photos[0].category,
+        description: photos[0].description,
+        location: photos[0].location,
+        isCover: photos.some(photo => photo.isCover),
+        photos,
+        grouped
+      }];
+    });
+  }
+
   function render() {
     grid.classList.toggle('is-admin', isAdmin);
     grid.classList.toggle('manage-open', isAdmin && !adminPanel.hidden);
@@ -41,22 +71,28 @@
       grid.innerHTML = `<div class="gallery-empty">${isAdmin ? 'Aún no hay fotografías publicadas. Usa “Administrar galería” para agregar proyectos reales de MLY Solar O&amp;M.' : 'Estamos preparando la galería de proyectos de MLY Solar O&amp;M.'}</div>`;
       return;
     }
-    grid.innerHTML = items.map((item, index) => `<article class="gallery-card" data-id="${escapeHtml(item.id)}">
-      <button class="gallery-photo-button" type="button" data-action="open" aria-label="Ampliar fotografía: ${escapeHtml(item.title)}">
-        <img src="${itemImage(item)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async">${item.isCover ? '<span class="gallery-cover-badge">Portada</span>' : ''}
+    const individualItems = isAdmin && !adminPanel.hidden;
+    const cards = individualItems ? items.map(item => ({...item, photos: [item], grouped: false})) : groupForDisplay(items);
+    renderedCards = cards;
+    grid.innerHTML = cards.map((item, index) => {
+      const coverPhoto = item.photos.find(photo => photo.isCover) || item.photos.find(photo => photo.published) || item.photos[0];
+      return `<article class="gallery-card" data-id="${escapeHtml(item.id)}">
+      <button class="gallery-photo-button" type="button" data-action="open" aria-label="Ampliar ${item.photos.length} fotografía(s) de ${escapeHtml(item.title)}">
+        <img src="${itemImage(coverPhoto)}" alt="${escapeHtml(item.title)}" loading="lazy" decoding="async">${item.isCover ? '<span class="gallery-cover-badge">Portada</span>' : ''}${item.grouped ? `<span class="gallery-photo-count">${item.photos.length} fotos</span>` : ''}
       </button>
       <div class="gallery-card-body"><p class="gallery-category">${escapeHtml(item.category)}</p><h3>${escapeHtml(item.title)}</h3>
         ${item.description ? `<p class="gallery-card-description">${escapeHtml(item.description)}</p>` : ''}
         ${item.location ? `<small class="gallery-location">${escapeHtml(item.location)}</small>` : ''}
-        ${isAdmin ? `<div class="gallery-admin-tools" aria-label="Acciones de ${escapeHtml(item.title)}">
+        ${isAdmin && individualItems ? `<div class="gallery-admin-tools" aria-label="Acciones de ${escapeHtml(item.title)}">
           <button type="button" data-action="edit">Editar</button>
           <button type="button" data-action="publish">${item.published ? 'Ocultar' : 'Publicar'}</button>
           <button type="button" data-action="cover" ${item.published ? '' : 'disabled title="Publica la fotografía primero"'}>${item.isCover ? 'Portada actual' : 'Elegir portada'}</button>
           <button type="button" data-action="up" ${index === 0 ? 'disabled' : ''} aria-label="Mover arriba">↑</button>
-          <button type="button" data-action="down" ${index === items.length - 1 ? 'disabled' : ''} aria-label="Mover abajo">↓</button>
+          <button type="button" data-action="down" ${index === cards.length - 1 ? 'disabled' : ''} aria-label="Mover abajo">↓</button>
           <button type="button" class="danger" data-action="delete">Eliminar</button>
           ${!item.published ? '<span class="gallery-hidden-label">Oculta</span>' : ''}
-        </div>` : ''}</div></article>`).join('');
+        </div>` : ''}</div></article>`;
+    }).join('');
   }
 
   function applyCover() {
@@ -171,13 +207,24 @@
     } finally { button.disabled = false; }
   });
 
+  function showLightboxPhoto(index) {
+    if (!lightboxPhotos.length) return;
+    lightboxIndex = (index + lightboxPhotos.length) % lightboxPhotos.length;
+    const photo = lightboxPhotos[lightboxIndex];
+    document.querySelector('#gallery-lightbox-image').src = `/api/gallery/${encodeURIComponent(photo.id)}/image?variant=original`;
+    document.querySelector('#gallery-lightbox-image').alt = photo.title;
+    document.querySelector('#gallery-lightbox-title').textContent = lightboxPhotos.length > 1 ? photo.title.replace(/\s+\d+$/, '') : photo.title;
+    document.querySelector('#gallery-lightbox-category').textContent = photo.category;
+    document.querySelector('#gallery-lightbox-description').textContent = photo.description || '';
+    document.querySelector('#gallery-lightbox-location').textContent = photo.location || '';
+    document.querySelector('#gallery-lightbox-counter').textContent = lightboxPhotos.length > 1 ? `${lightboxIndex + 1} de ${lightboxPhotos.length} fotos` : '';
+    document.querySelector('#gallery-lightbox-prev').hidden = lightboxPhotos.length < 2;
+    document.querySelector('#gallery-lightbox-next').hidden = lightboxPhotos.length < 2;
+  }
+
   function openLightbox(item) {
-    document.querySelector('#gallery-lightbox-image').src = `/api/gallery/${encodeURIComponent(item.id)}/image?variant=original`;
-    document.querySelector('#gallery-lightbox-image').alt = item.title;
-    document.querySelector('#gallery-lightbox-title').textContent = item.title;
-    document.querySelector('#gallery-lightbox-category').textContent = item.category;
-    document.querySelector('#gallery-lightbox-description').textContent = item.description || '';
-    document.querySelector('#gallery-lightbox-location').textContent = item.location || '';
+    lightboxPhotos = item.photos || [item];
+    showLightboxPhoto(0);
     lightbox.showModal();
   }
 
@@ -215,7 +262,7 @@
   grid.addEventListener('click', async event => {
     const card = event.target.closest('.gallery-card');
     if (!card) return;
-    const item = items.find(entry => entry.id === card.dataset.id);
+    const item = renderedCards.find(entry => entry.id === card.dataset.id);
     if (!item) return;
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (!action || action === 'open') { openLightbox(item); return; }
@@ -233,6 +280,8 @@
   });
 
   document.querySelector('#gallery-lightbox-close').addEventListener('click', () => lightbox.close());
+  document.querySelector('#gallery-lightbox-prev').addEventListener('click', () => showLightboxPhoto(lightboxIndex - 1));
+  document.querySelector('#gallery-lightbox-next').addEventListener('click', () => showLightboxPhoto(lightboxIndex + 1));
   lightbox.addEventListener('click', event => { if (event.target === lightbox) lightbox.close(); });
   document.querySelector('#gallery-edit-close').addEventListener('click', () => editDialog.close());
   document.querySelector('#gallery-edit-cancel').addEventListener('click', () => editDialog.close());
