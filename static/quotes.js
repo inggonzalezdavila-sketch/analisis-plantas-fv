@@ -83,7 +83,7 @@
     } catch (error) {
       if (/permiso|sesión|inicia sesión/i.test(error.message)) {
         panel.hidden = true;
-        const link = document.querySelector('.app-nav a[href="#quotes-panel"]');
+        const link = document.querySelector('[data-module-link="cotizaciones-view"]') || document.querySelector('.app-nav a[href="#quotes-panel"]');
         if (link) link.hidden = true;
         return;
       }

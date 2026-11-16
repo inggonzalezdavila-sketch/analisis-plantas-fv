@@ -21,6 +21,18 @@ function doPost(e) {
       result = updateQuote_(spreadsheet, request);
     } else if (request.action === "add_product") {
       result = addProduct_(spreadsheet, request.product);
+    } else if (request.action === "gallery_list") {
+      result = {items: listGallery_(spreadsheet, Boolean(request.include_hidden))};
+    } else if (request.action === "gallery_image") {
+      result = galleryImage_(spreadsheet, String(request.item_id || ""), String(request.variant || "original"), Boolean(request.include_hidden));
+    } else if (request.action === "gallery_create") {
+      result = createGalleryItem_(spreadsheet, request.item);
+    } else if (request.action === "gallery_update") {
+      result = updateGalleryItem_(spreadsheet, String(request.item_id || ""), request.item);
+    } else if (request.action === "gallery_delete") {
+      result = deleteGalleryItem_(spreadsheet, String(request.item_id || ""));
+    } else if (request.action === "gallery_reorder") {
+      result = reorderGallery_(spreadsheet, request.item_ids);
     } else {
       throw new Error("La operación solicitada no está disponible.");
     }
@@ -32,6 +44,19 @@ function doPost(e) {
 
 function doGet() {
   return jsonOutput_({service: "MLY Solar Cotizaciones", ready: true});
+}
+
+/** Ejecutar una sola vez para autorizar el almacenamiento de fotos en Drive. */
+function initializeGalleryStorage() {
+  var properties = PropertiesService.getScriptProperties();
+  var spreadsheetId = properties.getProperty("SPREADSHEET_ID") || "";
+  if (!spreadsheetId) throw new Error("Primero debe estar configurada la conexión actual de cotizaciones.");
+  var spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  var folder = galleryFolder_();
+  gallerySheet_(spreadsheet);
+  SpreadsheetApp.flush();
+  Logger.log("Galería preparada en Drive: " + folder.getUrl());
+  return "Almacenamiento de galería listo en Google Drive.";
 }
 
 /** Ejecutar una sola vez desde este proyecto vinculado a la hoja. */
@@ -222,4 +247,175 @@ function addProduct_(spreadsheet, product) {
   } finally {
     lock.releaseLock();
   }
+}
+
+var GALLERY_HEADERS_ = ["ID", "Título", "Descripción", "Ubicación", "Categoría", "Publicada", "Portada", "Orden", "Creada", "Archivo original", "Miniatura base64", "Tipo MIME"];
+
+function gallerySheet_(spreadsheet) {
+  var sheet = spreadsheet.getSheetByName("Galeria_Proyectos");
+  if (!sheet) sheet = spreadsheet.insertSheet("Galeria_Proyectos");
+  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, GALLERY_HEADERS_.length).setValues([GALLERY_HEADERS_]);
+  var headers = sheet.getRange(1, 1, 1, GALLERY_HEADERS_.length).getValues()[0];
+  if (headers.join("|") !== GALLERY_HEADERS_.join("|")) throw new Error("La pestaña Galeria_Proyectos tiene encabezados inesperados.");
+  return sheet;
+}
+
+function galleryFolder_() {
+  var properties = PropertiesService.getScriptProperties();
+  var folderId = properties.getProperty("GALLERY_FOLDER_ID") || "";
+  if (folderId) {
+    try { return DriveApp.getFolderById(folderId); } catch (error) { properties.deleteProperty("GALLERY_FOLDER_ID"); }
+  }
+  var folder = DriveApp.createFolder("MLY SolarOps - Galería de proyectos");
+  properties.setProperty("GALLERY_FOLDER_ID", folder.getId());
+  return folder;
+}
+
+function galleryRows_(spreadsheet) {
+  var sheet = gallerySheet_(spreadsheet);
+  var lastRow = sheet.getLastRow();
+  return lastRow < 2 ? [] : sheet.getRange(2, 1, lastRow - 1, GALLERY_HEADERS_.length).getValues().map(function(row, index) {
+    return {rowNumber: index + 2, id: String(row[0] || ""), title: String(row[1] || ""), description: String(row[2] || ""),
+      location: String(row[3] || ""), category: String(row[4] || "Otro"), published: row[5] === true || String(row[5]).toLowerCase() === "true",
+      isCover: row[6] === true || String(row[6]).toLowerCase() === "true", sortOrder: Number(row[7] || 0), createdAt: String(row[8] || ""),
+      imageFileId: String(row[9] || ""), thumbnailData: String(row[10] || ""), mimeType: String(row[11] || "image/jpeg")};
+  });
+}
+
+function galleryPublicItem_(item, includeThumbnail) {
+  var result = {id: item.id, title: item.title, description: item.description, location: item.location, category: item.category,
+    published: item.published, isCover: item.isCover, sortOrder: item.sortOrder, createdAt: item.createdAt};
+  if (includeThumbnail) result.thumbnailData = item.thumbnailData || "";
+  return result;
+}
+
+function listGallery_(spreadsheet, includeHidden) {
+  var items = galleryRows_(spreadsheet).filter(function(item) { return includeHidden || item.published; });
+  items.sort(function(a, b) { return (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0); });
+  return items.slice(0, 100).map(function(item) { return galleryPublicItem_(item, true); });
+}
+
+function galleryImage_(spreadsheet, itemId, variant, includeHidden) {
+  if (!/^[a-f0-9]{32}$/.test(itemId) || ["original", "thumbnail"].indexOf(variant) < 0) throw new Error("La fotografía solicitada no existe.");
+  var item = galleryRows_(spreadsheet).find(function(entry) { return entry.id === itemId; });
+  if (!item || (!includeHidden && !item.published)) throw new Error("La fotografía solicitada no existe.");
+  if (variant === "thumbnail") {
+    if (!item.thumbnailData) throw new Error("La miniatura no está disponible.");
+    var thumbnailBytes = Utilities.base64Decode(item.thumbnailData);
+    return {data: Utilities.base64Encode(thumbnailBytes), mimeType: "image/jpeg"};
+  }
+  var fileId = item.imageFileId;
+  if (!fileId) throw new Error("La imagen no está disponible en Drive.");
+  var blob = DriveApp.getFileById(fileId).getBlob();
+  return {data: Utilities.base64Encode(blob.getBytes()), mimeType: blob.getContentType() || "image/jpeg"};
+}
+
+function galleryCreateFile_(folder, data, name) {
+  if (typeof data !== "string" || data.length > 3200000) throw new Error("La imagen optimizada está vacía o supera el tamaño permitido.");
+  var bytes = Utilities.base64Decode(data);
+  if (bytes.length < 4 || bytes.length > 2400000 || (bytes[0] & 255) !== 255 || (bytes[1] & 255) !== 216 || (bytes[bytes.length - 2] & 255) !== 255 || (bytes[bytes.length - 1] & 255) !== 217) {
+    throw new Error("Las imágenes deben estar optimizadas en formato JPEG y pesar menos de 2,4 MB.");
+  }
+  return folder.createFile(Utilities.newBlob(bytes, "image/jpeg", name));
+}
+
+function validateGalleryThumbnail_(data) {
+  if (typeof data !== "string" || data.length > 45000) throw new Error("La miniatura supera el tamaño permitido.");
+  var bytes = Utilities.base64Decode(data);
+  if (bytes.length < 4 || bytes.length > 32000 || (bytes[0] & 255) !== 255 || (bytes[1] & 255) !== 216 || (bytes[bytes.length - 2] & 255) !== 255 || (bytes[bytes.length - 1] & 255) !== 217) {
+    throw new Error("La miniatura optimizada no es un JPEG válido o supera 32 KB.");
+  }
+}
+
+function validateGalleryItem_(item) {
+  if (!item || typeof item !== "object" || !String(item.title || "").trim() || String(item.title).length > 160 ||
+      String(item.description || "").length > 1000 || String(item.location || "").length > 180 ||
+      ["Residencial", "Comercial", "Industrial", "Institucional", "Otro"].indexOf(String(item.category || "Otro")) < 0) {
+    throw new Error("Revisa el título, descripción, ubicación y categoría de la fotografía.");
+  }
+  if (item.isCover && !item.published) throw new Error("Publica la fotografía antes de elegirla como portada.");
+}
+
+function createGalleryItem_(spreadsheet, item) {
+  validateGalleryItem_(item);
+  if (!/^[a-f0-9]{32}$/.test(String(item.id || ""))) throw new Error("El identificador de la fotografía no es válido.");
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  var created = [];
+  try {
+    var sheet = gallerySheet_(spreadsheet), rows = galleryRows_(spreadsheet);
+    if (rows.length >= 100) throw new Error("La galería admite hasta 100 fotografías. Elimina una antes de agregar otra.");
+    if (rows.some(function(row) { return row.id === item.id; })) throw new Error("La fotografía ya existe.");
+    validateGalleryThumbnail_(item.thumbnailData);
+    var folder = galleryFolder_();
+    var image = galleryCreateFile_(folder, item.imageData, item.id + ".jpg"); created.push(image);
+    if (item.isCover) rows.forEach(function(row) { sheet.getRange(row.rowNumber, 7).setValue(false); });
+    var sortOrder = rows.reduce(function(max, row) { return Math.max(max, Number(row.sortOrder) || 0); }, -1) + 1;
+    var values = [item.id, String(item.title).trim(), String(item.description || ""), String(item.location || ""), String(item.category || "Otro"),
+      Boolean(item.published), Boolean(item.isCover), sortOrder, new Date().toISOString(), image.getId(), item.thumbnailData, "image/jpeg"];
+    sheet.appendRow(values); SpreadsheetApp.flush();
+    return {item: galleryPublicItem_({id: item.id, title: values[1], description: values[2], location: values[3], category: values[4], published: values[5], isCover: values[6], sortOrder: sortOrder, createdAt: values[8]}, false)};
+  } catch (error) {
+    created.forEach(function(file) { try { file.setTrashed(true); } catch (ignored) {} });
+    throw error;
+  } finally { lock.releaseLock(); }
+}
+
+function updateGalleryItem_(spreadsheet, itemId, item) {
+  validateGalleryItem_(item);
+  if (!/^[a-f0-9]{32}$/.test(itemId)) throw new Error("La fotografía solicitada no existe.");
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  var created = [];
+  try {
+    var sheet = gallerySheet_(spreadsheet), rows = galleryRows_(spreadsheet), current = rows.find(function(row) { return row.id === itemId; });
+    if (!current) throw new Error("La fotografía ya no está en la galería.");
+    var imageId = current.imageFileId, thumbnailData = current.thumbnailData;
+    if (item.imageData || item.thumbnailData) {
+      if (!item.imageData || !item.thumbnailData) throw new Error("Carga la imagen principal y la miniatura juntas.");
+      validateGalleryThumbnail_(item.thumbnailData);
+      var folder = galleryFolder_();
+      var image = galleryCreateFile_(folder, item.imageData, itemId + "_actualizada.jpg"); created.push(image);
+      imageId = image.getId(); thumbnailData = item.thumbnailData;
+    }
+    if (item.isCover) rows.forEach(function(row) { if (row.id !== itemId) sheet.getRange(row.rowNumber, 7).setValue(false); });
+    sheet.getRange(current.rowNumber, 2, 1, 11).setValues([[
+      String(item.title).trim(), String(item.description || ""), String(item.location || ""), String(item.category || "Otro"),
+      Boolean(item.published), Boolean(item.isCover), current.sortOrder, current.createdAt, imageId, thumbnailData, "image/jpeg"
+    ]]);
+    SpreadsheetApp.flush();
+    if (imageId !== current.imageFileId) { try { DriveApp.getFileById(current.imageFileId).setTrashed(true); } catch (ignored) {} }
+    var saved = Object.assign({}, item, {id: itemId, sortOrder: current.sortOrder, createdAt: current.createdAt});
+    delete saved.imageData; delete saved.thumbnailData;
+    return {item: saved};
+  } catch (error) {
+    created.forEach(function(file) { try { file.setTrashed(true); } catch (ignored) {} });
+    throw error;
+  } finally { lock.releaseLock(); }
+}
+
+function deleteGalleryItem_(spreadsheet, itemId) {
+  if (!/^[a-f0-9]{32}$/.test(itemId)) throw new Error("La fotografía solicitada no existe.");
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var sheet = gallerySheet_(spreadsheet), item = galleryRows_(spreadsheet).find(function(row) { return row.id === itemId; });
+    if (!item) throw new Error("La fotografía ya no está en la galería.");
+    sheet.deleteRow(item.rowNumber);
+    if (item.imageFileId) { try { DriveApp.getFileById(item.imageFileId).setTrashed(true); } catch (ignored) {} }
+    SpreadsheetApp.flush(); return {deleted: true};
+  } finally { lock.releaseLock(); }
+}
+
+function reorderGallery_(spreadsheet, itemIds) {
+  if (!Array.isArray(itemIds) || itemIds.length > 100) throw new Error("La lista de orden de la galería no es válida.");
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var sheet = gallerySheet_(spreadsheet), rows = galleryRows_(spreadsheet);
+    if (itemIds.length !== rows.length || new Set(itemIds).size !== rows.length || rows.some(function(row) { return itemIds.indexOf(row.id) < 0; })) {
+      throw new Error("La galería cambió. Recárgala y vuelve a ordenar.");
+    }
+    var orderById = {}; itemIds.forEach(function(id, index) { orderById[id] = index; });
+    rows.forEach(function(row) { sheet.getRange(row.rowNumber, 8).setValue(orderById[row.id]); });
+    SpreadsheetApp.flush(); return {saved: true};
+  } finally { lock.releaseLock(); }
 }

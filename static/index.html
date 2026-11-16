@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>MLY SolarOps · Operación FV</title><link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/queue.css"><link rel="stylesheet" href="/static/plant-visual.css"><link rel="stylesheet" href="/static/progress.css"><link rel="stylesheet" href="/static/strings.css"><link rel="stylesheet" href="/static/diagnostics.css"><link rel="stylesheet" href="/static/quotes.css">
+  <title>MLY SolarOps · Operación FV</title><link rel="stylesheet" href="/static/styles.css"><link rel="stylesheet" href="/static/queue.css"><link rel="stylesheet" href="/static/plant-visual.css"><link rel="stylesheet" href="/static/progress.css"><link rel="stylesheet" href="/static/strings.css"><link rel="stylesheet" href="/static/diagnostics.css"><link rel="stylesheet" href="/static/quotes.css"><link rel="stylesheet" href="/static/gallery.css">
 </head>
 <body>
   <header id="top" class="app-header">
@@ -12,19 +12,41 @@
         <span><b>MLY <em>SOLAROPS</em></b><small>Operación | Análisis | Decisiones</small></span>
       </a>
       <nav class="app-nav" aria-label="Navegación principal">
-        <a href="#top">Inicio</a>
-        <a href="#fusionsolar-panel">Plantas</a>
-        <a href="#app">Análisis</a>
-        <a href="#fusionsolar-report-panel">Reportes</a>
-        <a href="#quotes-panel">Cotizaciones</a>
+        <a href="#inicio-view" data-module-link="inicio-view">Inicio</a>
+        <a href="#plantas-view" data-module-link="plantas-view">Plantas</a>
+        <a href="#analisis-view" data-module-link="analisis-view">Análisis</a>
+        <a href="#reportes-view" data-module-link="reportes-view">Reportes</a>
+        <a href="#cotizaciones-view" data-module-link="cotizaciones-view">Cotizaciones</a>
       </nav>
       <div class="account-actions"><span id="current-user" class="current-user" hidden></span><button id="logout" class="clear" type="button">Cerrar sesión</button></div>
     </div>
   </header>
   <section class="brand-header" aria-labelledby="hero-title">
-    <div class="brand-intro"><div class="brand-kicker"><i class="brand-mark" aria-hidden="true"></i><p>MLY SOLAROPS</p></div><h1 id="hero-title">Operación solar,<br>con <span>visión completa.</span></h1><p class="brand-subtitle">Monitorea, analiza y optimiza el desempeño de tus plantas fotovoltaicas en un solo lugar.</p><p id="status">Cargando datos…</p><div id="analysis-progress" class="analysis-progress" hidden><span></span></div></div>
+    <div class="brand-intro"><div class="brand-kicker"><i class="brand-mark" aria-hidden="true"></i><p>MLY SOLAROPS</p></div><h1 id="hero-title">Energía solar<br>con <span>visión de futuro.</span></h1><p class="brand-subtitle">Operación, análisis y decisiones para proyectos fotovoltaicos de alto desempeño.</p></div>
   </section>
-  <section class="workspace-actions" aria-label="Acciones de análisis"><button id="clear" class="clear" type="button">Limpiar datos</button><label class="upload"><span id="upload-label">Seleccionar XLSX</span><input id="files" type="file" accept=".xlsx"></label><button id="analyse" class="analyse" type="button" disabled>Analizar datos</button></section>
+  <section id="home-gallery" class="home-gallery">
+    <div class="gallery-heading"><div><p class="eyebrow">PROYECTOS MLY SOLAR O&amp;M</p><h2>Soluciones solares en campo</h2><p class="gallery-lead">Conoce proyectos, instalaciones y trabajos realizados por nuestro equipo.</p></div><button id="gallery-manage-toggle" class="clear" type="button" hidden>Administrar galería</button></div>
+    <div id="gallery-admin-panel" class="gallery-admin-panel" hidden>
+      <div class="gallery-admin-heading"><div><b>Administrar fotografías</b><p>Las fotos se optimizan y se guardan en una carpeta privada de Google Drive.</p></div><button id="gallery-admin-close" class="clear" type="button">Cerrar</button></div>
+      <div class="gallery-upload-form">
+        <label class="gallery-file-picker">Seleccionar fotografías<input id="gallery-files" type="file" accept="image/jpeg,image/png,image/webp" multiple></label>
+        <label>Título base<input id="gallery-upload-title" maxlength="160" placeholder="Opcional; varias fotos llevan consecutivo"></label>
+        <label>Descripción común<input id="gallery-upload-description" maxlength="1000" placeholder="Instalación de sistema fotovoltaico…"></label>
+        <label>Ubicación<input id="gallery-upload-location" maxlength="180" placeholder="Ciudad, departamento"></label>
+        <label>Categoría<select id="gallery-upload-category"><option>Comercial</option><option>Residencial</option><option>Industrial</option><option>Institucional</option><option>Otro</option></select></label>
+        <label class="gallery-check"><input id="gallery-upload-published" type="checkbox" checked> Publicar al guardar</label>
+        <label class="gallery-check"><input id="gallery-upload-cover" type="checkbox"> Usar la primera como portada</label>
+        <button id="gallery-upload-submit" class="analyse" type="button">Subir fotografías</button>
+      </div>
+      <p class="gallery-upload-hint">JPEG, PNG o WebP · máximo 10 fotos por carga y 15 MB por archivo. Las imágenes se convierten a JPEG optimizado.</p>
+      <p id="gallery-admin-status" class="gallery-status" role="status" aria-live="polite"></p>
+    </div>
+    <p id="gallery-status" class="gallery-status" role="status" aria-live="polite">Cargando proyectos…</p>
+    <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
+  </section>
+  <dialog id="gallery-lightbox" class="gallery-lightbox" aria-label="Fotografía del proyecto"><button id="gallery-lightbox-close" class="gallery-dialog-close" type="button" aria-label="Cerrar fotografía">×</button><img id="gallery-lightbox-image" alt=""><div class="gallery-lightbox-caption"><p class="eyebrow" id="gallery-lightbox-category"></p><h2 id="gallery-lightbox-title"></h2><p id="gallery-lightbox-description"></p><small id="gallery-lightbox-location"></small></div></dialog>
+  <dialog id="gallery-edit-dialog" class="gallery-edit-dialog"><form id="gallery-edit-form" method="dialog"><div class="gallery-dialog-heading"><div><p class="eyebrow">GALERÍA DE PROYECTOS</p><h2>Editar fotografía</h2></div><button id="gallery-edit-close" class="gallery-dialog-close" type="button" aria-label="Cerrar">×</button></div><label>Título<input id="gallery-edit-title" maxlength="160" required></label><label>Descripción<textarea id="gallery-edit-description" rows="4" maxlength="1000"></textarea></label><div class="gallery-edit-fields"><label>Ubicación<input id="gallery-edit-location" maxlength="180"></label><label>Categoría<select id="gallery-edit-category"><option>Residencial</option><option>Comercial</option><option>Industrial</option><option>Institucional</option><option>Otro</option></select></label></div><label class="gallery-check"><input id="gallery-edit-published" type="checkbox"> Publicada en Inicio</label><label class="gallery-check"><input id="gallery-edit-cover" type="checkbox"> Usar como portada del banner</label><label class="gallery-file-picker">Reemplazar imagen (opcional)<input id="gallery-edit-file" type="file" accept="image/jpeg,image/png,image/webp"></label><p id="gallery-edit-status" class="gallery-status" role="status" aria-live="polite"></p><div class="gallery-dialog-actions"><button id="gallery-edit-cancel" class="clear" type="button">Cancelar</button><button id="gallery-edit-save" class="analyse" type="submit">Guardar cambios</button></div></form></dialog>
+  <section class="workspace-actions" aria-label="Acciones de análisis"><div class="workspace-status"><p id="status" role="status" aria-live="polite">Cargando datos…</p><div id="analysis-progress" class="analysis-progress" hidden><span></span></div></div><button id="clear" class="clear" type="button">Limpiar datos</button><label class="upload"><span id="upload-label">Seleccionar XLSX</span><input id="files" type="file" accept=".xlsx"></label><button id="analyse" class="analyse" type="button" disabled>Analizar datos</button></section>
   <section id="file-queue" class="file-queue" hidden><div><p class="eyebrow">ARCHIVOS PREPARADOS</p><h2>Archivos pendientes de análisis</h2></div><div id="queued-files" class="queued-files"></div></section>
   <section id="fusionsolar-panel" class="integration-panel" hidden><div><p class="eyebrow">CONEXIÓN DE PLANTAS</p><h2>FusionSolar</h2><p>Consulta de solo lectura. No permite cambiar ajustes ni controlar inversores.</p></div><button id="fusionsolar-load" class="analyse" type="button">Actualizar datos de plantas</button><div id="fusionsolar-result" class="integration-result" aria-live="polite"></div></section>
   <section id="soliscloud-panel" class="integration-panel" hidden><div><p class="eyebrow">CONEXIÓN DE PLANTAS</p><h2>SolisCloud</h2><p>Consulta de solo lectura para las plantas y los inversores autorizados en SolisCloud.</p></div><button id="soliscloud-load" class="analyse" type="button">Actualizar datos de SolisCloud</button><div id="soliscloud-result" class="integration-result" aria-live="polite"></div></section>
@@ -97,5 +119,5 @@
     <section class="panel"><div class="section-title"><div><p class="eyebrow">ACTIVOS</p><h2>Estado de plantas e inversores</h2></div></div><div id="plants" class="plants"></div></section>
   </main>
   <article id="operational-report" class="detailed-report operational-report" hidden aria-live="polite"></article>
-  <script src="/static/app.js"></script><script src="/static/quotes.js"></script>
+  <script src="/static/app.js"></script><script src="/static/quotes.js"></script><script src="/static/modules.js"></script><script src="/static/gallery.js"></script>
 </body></html>

@@ -39,6 +39,7 @@ from xml.etree import ElementTree as ET
 
 import quotes as quote_store
 import google_sheets
+import gallery_store
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -50,6 +51,7 @@ SIMULATION_DIR.mkdir(exist_ok=True)
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 DATA_LOCK = threading.RLock()
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "50")) * 1024 * 1024
+MAX_GALLERY_REQUEST_BYTES = 5 * 1024 * 1024
 SESSION_COOKIE = "fv_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 LOGIN_WINDOW_SECONDS = 15 * 60
@@ -1585,6 +1587,31 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if not self.require_auth():
             return
+        if route == "/api/gallery":
+            user = self.current_user()
+            try:
+                items = gallery_store.list_items(include_hidden=bool(user and user["role"] == "admin"))
+                self.send_json({"items": items})
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar la galería."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        gallery_image_match = re.fullmatch(r"/api/gallery/([a-f0-9]{32})/image", route)
+        if gallery_image_match:
+            user = self.current_user()
+            item_id = gallery_image_match.group(1)
+            variant = parse_qs(urlparse(self.path).query).get("variant", ["original"])[0]
+            try:
+                image, mime_type = gallery_store.get_image(item_id, variant, include_hidden=bool(user and user["role"] == "admin"))
+                self.send_bytes(image, mime_type)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar la fotografía."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if route == "/api/quotes":
             if not self.require_auth({"admin"}):
                 return
@@ -1754,6 +1781,39 @@ class Handler(SimpleHTTPRequestHandler):
             if self.require_auth():
                 self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
             return
+        gallery_update_match = re.fullmatch(r"/api/gallery/items/([a-f0-9]{32})", route)
+        if route in {"/api/gallery/items", "/api/gallery/reorder"} or gallery_update_match:
+            if not self.require_auth({"admin"}):
+                return
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < content_length <= MAX_GALLERY_REQUEST_BYTES:
+                self.send_json({"error": "La solicitud de galería está vacía o supera el límite permitido de 5 MB."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            try:
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                if route == "/api/gallery/reorder":
+                    item_ids = payload.get("itemIds") if isinstance(payload, dict) else None
+                    if not isinstance(item_ids, list) or any(not isinstance(item_id, str) or not re.fullmatch(r"[a-f0-9]{32}", item_id) for item_id in item_ids):
+                        raise ValueError("La lista de orden de la galería no es válida.")
+                    gallery_store.reorder_items(item_ids)
+                    self.send_json({"saved": True})
+                    return
+                item = gallery_store.normalize_item(payload, new=not bool(gallery_update_match))
+                if gallery_update_match:
+                    saved = gallery_store.update_item(gallery_update_match.group(1), item)
+                    self.send_json({"item": saved})
+                else:
+                    saved = gallery_store.create_item(item)
+                    self.send_json({"item": saved}, HTTPStatus.CREATED)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.send_json({"error": "Los datos de la fotografía no tienen un formato válido."}, HTTPStatus.BAD_REQUEST)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible guardar la fotografía."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         quote_update_match = re.fullmatch(r"/api/quotes/([a-f0-9]{32})/update", route)
         product_add = route == "/api/quotes/products"
         if route in {"/api/quotes", "/api/quotes/template"} or quote_update_match or product_add:
@@ -1894,10 +1954,22 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         route = urlparse(self.path).path
-        if route not in {"/api/data", "/api/simulation/data"}:
+        gallery_delete_match = re.fullmatch(r"/api/gallery/items/([a-f0-9]{32})", route)
+        if route not in {"/api/data", "/api/simulation/data"} and not gallery_delete_match:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.require_auth({"admin"}):
+            return
+        if gallery_delete_match:
+            try:
+                gallery_store.delete_item(gallery_delete_match.group(1))
+                self.send_json({"deleted": True})
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible eliminar la fotografía."}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         with DATA_LOCK:
             deleted = 0
@@ -1924,6 +1996,16 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         for cookie in cookies or []:
             self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def send_bytes(self, payload: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK):
+        if content_type not in {"image/jpeg", "image/png", "image/webp"}:
+            self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
+            return
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
