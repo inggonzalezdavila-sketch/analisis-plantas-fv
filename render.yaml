@@ -12,3 +12,5 @@ services:
         value: "50"
       - key: QUOTE_STORAGE_BACKEND
         value: apps_script
+      - key: PUBLIC_QUOTE_CONTACT_URL
+        sync: false

@@ -33,6 +33,18 @@ function doPost(e) {
       result = deleteGalleryItem_(spreadsheet, String(request.item_id || ""));
     } else if (request.action === "gallery_reorder") {
       result = reorderGallery_(spreadsheet, request.item_ids);
+    } else if (request.action === "services_list") {
+      result = {items: listServices_(spreadsheet, Boolean(request.include_hidden))};
+    } else if (request.action === "services_image") {
+      result = serviceImage_(spreadsheet, String(request.item_id || ""), String(request.variant || "original"), Boolean(request.include_hidden));
+    } else if (request.action === "services_create") {
+      result = createService_(spreadsheet, request.item);
+    } else if (request.action === "services_update") {
+      result = updateService_(spreadsheet, String(request.item_id || ""), request.item);
+    } else if (request.action === "services_delete") {
+      result = deleteService_(spreadsheet, String(request.item_id || ""));
+    } else if (request.action === "services_reorder") {
+      result = reorderServices_(spreadsheet, request.item_ids);
     } else {
       throw new Error("La operación solicitada no está disponible.");
     }
@@ -417,5 +429,161 @@ function reorderGallery_(spreadsheet, itemIds) {
     var orderById = {}; itemIds.forEach(function(id, index) { orderById[id] = index; });
     rows.forEach(function(row) { sheet.getRange(row.rowNumber, 8).setValue(orderById[row.id]); });
     SpreadsheetApp.flush(); return {saved: true};
+  } finally { lock.releaseLock(); }
+}
+
+var SERVICE_HEADERS_ = ["ID", "Nombre", "Descripción", "Servicios JSON", "Publicado", "Orden", "Creado", "Archivo original", "Miniatura base64", "Tipo MIME"];
+var DEFAULT_SERVICE_DATA_ = [
+  ["Diseño e instalación de sistemas solares", "Diseñamos e implementamos soluciones fotovoltaicas adaptadas a las necesidades energéticas de hogares, comercios, industrias y comunidades.", ["Sistemas solares On-Grid.", "Sistemas solares Off-Grid.", "Sistemas híbridos con almacenamiento.", "Dimensionamiento y estudios de viabilidad.", "Ampliación y modernización de instalaciones."]],
+  ["Operación y mantenimiento (O&M)", "Mantenemos los sistemas fotovoltaicos en condiciones óptimas de funcionamiento, confiabilidad y desempeño energético.", ["Mantenimiento preventivo y correctivo.", "Diagnóstico de inversores y cadenas fotovoltaicas.", "Inspecciones eléctricas y termográficas.", "Pruebas y puesta en marcha.", "Optimización de rendimiento."]],
+  ["Ingeniería y servicios eléctricos", "Desarrollamos soluciones de ingeniería para instalaciones eléctricas seguras, eficientes y confiables.", ["Diseño de instalaciones eléctricas.", "Montaje y adecuación de tableros.", "Sistemas de protección y puesta a tierra.", "Diagnóstico de calidad de energía.", "Mantenimiento de instalaciones eléctricas."]],
+  ["Consultoría y legalización de proyectos", "Acompañamos los procesos técnicos y documentales necesarios para la conexión y legalización de proyectos de generación solar.", ["Trámites AGPE y GD.", "Gestión ante operadores de red.", "Memorias de cálculo y planos.", "Asesoría técnica para cumplimiento RETIE.", "Consultoría energética y regulatoria."]],
+  ["Monitoreo y análisis energético", "Utilizamos herramientas digitales y análisis de datos para supervisar el desempeño de los sistemas fotovoltaicos y detectar oportunidades de mejora.", ["Monitoreo de plantas solares.", "Análisis de generación y consumo.", "Evaluación de autoconsumo y excedentes.", "Diagnóstico de pérdidas de rendimiento.", "Elaboración de informes técnicos."]],
+  ["Automatización y comunicaciones", "Integramos equipos, sistemas de medición y plataformas digitales para mejorar el control y supervisión de instalaciones energéticas.", ["Configuración de inversores.", "Integración de SmartLogger y medidores.", "Comunicación RS485, Modbus y Ethernet.", "Configuración de cero exportación.", "Integración de sistemas de supervisión y control."]]
+];
+
+function serviceSheet_(spreadsheet) {
+  var sheet = spreadsheet.getSheetByName("Portafolio_Servicios");
+  if (!sheet) sheet = spreadsheet.insertSheet("Portafolio_Servicios");
+  if (sheet.getLastRow() === 0) sheet.getRange(1, 1, 1, SERVICE_HEADERS_.length).setValues([SERVICE_HEADERS_]);
+  var headers = sheet.getRange(1, 1, 1, SERVICE_HEADERS_.length).getValues()[0];
+  if (headers.join("|") !== SERVICE_HEADERS_.join("|")) throw new Error("La pestaña Portafolio_Servicios tiene encabezados inesperados.");
+  var properties = PropertiesService.getScriptProperties();
+  if (sheet.getLastRow() < 2 && properties.getProperty("SERVICES_INITIALIZED") !== "true") {
+    var now = new Date().toISOString();
+    var rows = DEFAULT_SERVICE_DATA_.map(function(entry, index) {
+      return [Utilities.getUuid().replace(/-/g, "").toLowerCase(), entry[0], entry[1], JSON.stringify(entry[2]), true, index, now, "", "", "image/jpeg"];
+    });
+    sheet.getRange(2, 1, rows.length, SERVICE_HEADERS_.length).setValues(rows);
+    properties.setProperty("SERVICES_INITIALIZED", "true");
+  }
+  return sheet;
+}
+
+function serviceFolder_() {
+  var properties = PropertiesService.getScriptProperties();
+  var folderId = properties.getProperty("SERVICES_FOLDER_ID") || "";
+  if (folderId) {
+    try { return DriveApp.getFolderById(folderId); } catch (error) { properties.deleteProperty("SERVICES_FOLDER_ID"); }
+  }
+  var folder = DriveApp.createFolder("MLY SolarOps - Portafolio de servicios");
+  properties.setProperty("SERVICES_FOLDER_ID", folder.getId());
+  return folder;
+}
+
+function serviceRows_(spreadsheet) {
+  var sheet = serviceSheet_(spreadsheet), lastRow = sheet.getLastRow();
+  return lastRow < 2 ? [] : sheet.getRange(2, 1, lastRow - 1, SERVICE_HEADERS_.length).getValues().map(function(row, index) {
+    var services = [];
+    try { services = JSON.parse(String(row[3] || "[]")); } catch (ignored) {}
+    return {rowNumber: index + 2, id: String(row[0] || ""), name: String(row[1] || ""), description: String(row[2] || ""),
+      services: Array.isArray(services) ? services : [], published: row[4] === true || String(row[4]).toLowerCase() === "true",
+      sortOrder: Number(row[5] || 0), createdAt: String(row[6] || ""), imageFileId: String(row[7] || ""),
+      thumbnailData: String(row[8] || ""), mimeType: String(row[9] || "image/jpeg")};
+  });
+}
+
+function servicePublicItem_(item, includeThumbnail) {
+  var result = {id: item.id, name: item.name, description: item.description, services: item.services, published: item.published,
+    sortOrder: item.sortOrder, createdAt: item.createdAt, imageAvailable: Boolean(item.imageFileId)};
+  if (includeThumbnail) result.thumbnailData = item.thumbnailData || "";
+  return result;
+}
+
+function listServices_(spreadsheet, includeHidden) {
+  var items = serviceRows_(spreadsheet).filter(function(item) { return includeHidden || item.published; });
+  items.sort(function(a, b) { return (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0); });
+  return items.slice(0, 100).map(function(item) { return servicePublicItem_(item, true); });
+}
+
+function serviceImage_(spreadsheet, itemId, variant, includeHidden) {
+  if (!/^[a-f0-9]{32}$/.test(itemId) || ["original", "thumbnail"].indexOf(variant) < 0) throw new Error("La fotografía del servicio no existe.");
+  var item = serviceRows_(spreadsheet).find(function(entry) { return entry.id === itemId; });
+  if (!item || (!includeHidden && !item.published)) throw new Error("El servicio no existe.");
+  if (variant === "thumbnail") {
+    if (!item.thumbnailData) throw new Error("El servicio aún no tiene fotografía.");
+    return {data: item.thumbnailData, mimeType: "image/jpeg"};
+  }
+  if (!item.imageFileId) throw new Error("El servicio aún no tiene fotografía.");
+  var blob = DriveApp.getFileById(item.imageFileId).getBlob();
+  return {data: Utilities.base64Encode(blob.getBytes()), mimeType: blob.getContentType() || "image/jpeg"};
+}
+
+function validateService_(item) {
+  if (!item || typeof item !== "object" || !String(item.name || "").trim() || String(item.name).length > 140 ||
+      !String(item.description || "").trim() || String(item.description).length > 1200 || !Array.isArray(item.services) ||
+      item.services.length < 1 || item.services.length > 20 || item.services.some(function(value) { return typeof value !== "string" || !value.trim() || value.length > 220; }) || typeof item.published !== "boolean") {
+    throw new Error("Revisa el nombre, descripción y lista de servicios (máximo 20 elementos).");
+  }
+  if (item.imageData || item.thumbnailData) {
+    if (!item.imageData || !item.thumbnailData || item.imageData.length > 2800000 || item.thumbnailData.length > 45000) throw new Error("La imagen optimizada o su miniatura supera el tamaño permitido.");
+    var thumbnail = Utilities.base64Decode(item.thumbnailData);
+    if (thumbnail.length < 4 || thumbnail.length > 32000 || (thumbnail[0] & 255) !== 255 || (thumbnail[1] & 255) !== 216 || (thumbnail[thumbnail.length - 2] & 255) !== 255 || (thumbnail[thumbnail.length - 1] & 255) !== 217) throw new Error("La miniatura optimizada no es un JPEG válido o supera 32 KB.");
+  }
+}
+
+function createService_(spreadsheet, item) {
+  validateService_(item);
+  if (!/^[a-f0-9]{32}$/.test(String(item.id || ""))) throw new Error("El identificador del servicio no es válido.");
+  var lock = LockService.getScriptLock(); lock.waitLock(20000); var created = [];
+  try {
+    var sheet = serviceSheet_(spreadsheet), rows = serviceRows_(spreadsheet);
+    if (rows.length >= 100) throw new Error("El portafolio admite hasta 100 servicios.");
+    if (rows.some(function(row) { return row.id === item.id; })) throw new Error("El servicio ya existe.");
+    var imageId = "", thumbnailData = "";
+    if (item.imageData) {
+      var image = galleryCreateFile_(serviceFolder_(), item.imageData, item.id + ".jpg");
+      created.push(image); imageId = image.getId(); thumbnailData = item.thumbnailData;
+    }
+    var sortOrder = rows.reduce(function(max, row) { return Math.max(max, Number(row.sortOrder) || 0); }, -1) + 1, now = new Date().toISOString();
+    sheet.appendRow([item.id, String(item.name).trim(), String(item.description).trim(), JSON.stringify(item.services), Boolean(item.published), sortOrder, now, imageId, thumbnailData, "image/jpeg"]);
+    SpreadsheetApp.flush();
+    return {item: servicePublicItem_({id:item.id,name:item.name,description:item.description,services:item.services,published:item.published,sortOrder:sortOrder,createdAt:now,imageFileId:imageId,thumbnailData:thumbnailData}, false)};
+  } catch (error) { created.forEach(function(file) { try { file.setTrashed(true); } catch (ignored) {} }); throw error; }
+  finally { lock.releaseLock(); }
+}
+
+function updateService_(spreadsheet, itemId, item) {
+  validateService_(item);
+  if (!/^[a-f0-9]{32}$/.test(itemId)) throw new Error("El servicio solicitado no existe.");
+  var lock = LockService.getScriptLock(); lock.waitLock(20000); var created = [];
+  try {
+    var sheet = serviceSheet_(spreadsheet), rows = serviceRows_(spreadsheet), current = rows.find(function(row) { return row.id === itemId; });
+    if (!current) throw new Error("El servicio ya no existe.");
+    var imageId = current.imageFileId, thumbnailData = current.thumbnailData;
+    if (item.imageData || item.thumbnailData) {
+      if (!item.imageData || !item.thumbnailData) throw new Error("Carga la imagen principal y la miniatura juntas.");
+      var image = galleryCreateFile_(serviceFolder_(), item.imageData, itemId + "_actualizada.jpg");
+      created.push(image); imageId = image.getId(); thumbnailData = item.thumbnailData;
+    }
+    sheet.getRange(current.rowNumber, 2, 1, 9).setValues([[String(item.name).trim(), String(item.description).trim(), JSON.stringify(item.services), Boolean(item.published), current.sortOrder, current.createdAt, imageId, thumbnailData, "image/jpeg"]]);
+    SpreadsheetApp.flush();
+    if (imageId !== current.imageFileId && current.imageFileId) { try { DriveApp.getFileById(current.imageFileId).setTrashed(true); } catch (ignored) {} }
+    return {item: servicePublicItem_(Object.assign({}, item, {id:itemId,sortOrder:current.sortOrder,createdAt:current.createdAt,imageFileId:imageId,thumbnailData:thumbnailData}), false)};
+  } catch (error) { created.forEach(function(file) { try { file.setTrashed(true); } catch (ignored) {} }); throw error; }
+  finally { lock.releaseLock(); }
+}
+
+function deleteService_(spreadsheet, itemId) {
+  if (!/^[a-f0-9]{32}$/.test(itemId)) throw new Error("El servicio solicitado no existe.");
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var sheet = serviceSheet_(spreadsheet), item = serviceRows_(spreadsheet).find(function(row) { return row.id === itemId; });
+    if (!item) throw new Error("El servicio ya no existe.");
+    sheet.deleteRow(item.rowNumber);
+    if (item.imageFileId) { try { DriveApp.getFileById(item.imageFileId).setTrashed(true); } catch (ignored) {} }
+    SpreadsheetApp.flush(); return {deleted:true};
+  } finally { lock.releaseLock(); }
+}
+
+function reorderServices_(spreadsheet, itemIds) {
+  if (!Array.isArray(itemIds) || itemIds.length > 100) throw new Error("La lista de orden de servicios no es válida.");
+  var lock = LockService.getScriptLock(); lock.waitLock(20000);
+  try {
+    var sheet = serviceSheet_(spreadsheet), rows = serviceRows_(spreadsheet);
+    if (itemIds.length !== rows.length || new Set(itemIds).size !== rows.length || rows.some(function(row) { return itemIds.indexOf(row.id) < 0; })) throw new Error("El portafolio cambió. Recárgalo y vuelve a ordenar.");
+    var orderById = {}; itemIds.forEach(function(id,index) { orderById[id] = index; });
+    rows.forEach(function(row) { sheet.getRange(row.rowNumber, 6).setValue(orderById[row.id]); });
+    SpreadsheetApp.flush(); return {saved:true};
   } finally { lock.releaseLock(); }
 }

@@ -71,3 +71,11 @@ El inicio muestra las fotografías publicadas de proyectos MLY. El usuario admin
 Para activar la persistencia de galería en Drive después de actualizar `Cotizaciones.gs`, ejecuta una sola vez `initializeGalleryStorage` desde el editor de Apps Script y autoriza el acceso adicional a Google Drive. Esto crea la carpeta privada y la pestaña de metadatos sin reiniciar el token ni la conexión actual. Luego actualiza la implementación existente con una nueva versión, conservando su URL y configuración. Render continuará usando los secretos existentes `APPS_SCRIPT_EXEC_URL` y `APPS_SCRIPT_TOKEN`.
 
 Apps Script no requiere que la app use una cuenta de servicio de Google Cloud; las ejecuciones están sujetas a las cuotas de Apps Script de tu cuenta. Consulta [publicar un web app de Apps Script](https://developers.google.com/apps-script/guides/web) y [sus cuotas](https://developers.google.com/apps-script/guides/services/quotas).
+
+### Portafolio público de servicios
+
+La ruta pública `/proyectos` presenta proyectos y servicios; los servicios se administran con una sesión de usuario `admin`. El catálogo inicial de seis categorías se crea en `Portafolio_Servicios` al actualizar el Apps Script y consultar el portafolio. Las fotos de servicios se optimizan en el navegador y se conservan en la carpeta privada de Drive `MLY SolarOps - Portafolio de servicios`; sus metadatos y miniaturas permanecen en la hoja. No se usa almacenamiento temporal de Render ni precios fijos.
+
+Para activar el portafolio en Render, actualiza `Cotizaciones.gs` en el proyecto Apps Script y vuelve a implementar una nueva versión conservando la URL existente, igual que en las actualizaciones anteriores. No cambies `APPS_SCRIPT_EXEC_URL` ni `APPS_SCRIPT_TOKEN`. La página pública muestra solo servicios publicados; la administración y las APIs de edición requieren rol `admin`.
+
+Configura `PUBLIC_QUOTE_CONTACT_URL` en Render con el canal comercial que quieras usar, por ejemplo una URL `https://wa.me/...`, `mailto:...` o `tel:...`. Mientras esté vacía, el botón de cotización aparecerá deshabilitado e indicará que falta configurar el canal. Entra a `/proyectos` con tu sesión de administrador para cargar una foto representativa para cada servicio; hasta entonces se muestra una ilustración corporativa de reemplazo.

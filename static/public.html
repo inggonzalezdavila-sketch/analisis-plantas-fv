@@ -18,7 +18,7 @@
       </a>
       <nav class="app-nav" aria-label="Navegación pública">
         <a href="#proyectos">Proyectos</a>
-        <a href="#portafolio">Productos y servicios</a>
+        <a href="#portafolio">Servicios</a>
       </nav>
       <div class="account-actions"><a class="clear" href="/login">Acceso equipo</a></div>
     </div>
@@ -36,10 +36,24 @@
       <p id="public-gallery-status" class="gallery-status" role="status" aria-live="polite">Cargando proyectos…</p>
       <div id="public-gallery-grid" class="gallery-grid" aria-live="polite"></div>
     </section>
-    <section id="portafolio" class="public-portfolio" aria-labelledby="portfolio-title">
-      <p class="eyebrow">NUESTRO PORTAFOLIO</p>
-      <h2 id="portfolio-title">Productos y servicios</h2>
-      <p>Estamos preparando esta sección para presentar nuestros productos y servicios.</p>
+    <section id="portafolio" class="public-services" aria-labelledby="services-title">
+      <div class="service-section-heading"><div><p class="eyebrow">PORTAFOLIO COMERCIAL</p><h2 id="services-title">Servicios de ingeniería y energía solar</h2><p>Soluciones técnicas para diseñar, operar y mejorar instalaciones energéticas.</p></div><button id="services-admin-toggle" class="clear" type="button" hidden>Administrar servicios</button></div>
+      <div id="services-admin-panel" class="services-admin-panel" hidden>
+        <div class="services-admin-title"><div><b>Administrar portafolio de servicios</b><p>Los cambios se guardan en Google Drive y se muestran en la página pública.</p></div><button id="services-admin-close" class="clear" type="button">Cerrar</button></div>
+        <form id="service-editor" class="service-editor">
+          <label>Nombre del servicio<input id="service-name" maxlength="140" required></label>
+          <label class="wide">Descripción<textarea id="service-description" rows="3" maxlength="1200" required></textarea></label>
+          <label class="wide">Servicios incluidos (uno por línea)<textarea id="service-items" rows="6" required></textarea></label>
+          <label class="service-photo-picker">Fotografía del servicio<input id="service-image" type="file" accept="image/jpeg,image/png,image/webp"></label>
+          <label class="service-published-check"><input id="service-published" type="checkbox" checked> Publicar en la página</label>
+          <div class="service-editor-actions"><button id="service-editor-cancel" class="clear" type="button" hidden>Cancelar edición</button><button id="service-save" class="analyse" type="submit">Crear servicio</button></div>
+        </form>
+        <p class="service-admin-hint">JPEG, PNG o WebP · máximo 15 MB por archivo; la app optimiza la foto antes de guardarla.</p>
+        <p id="services-admin-status" class="gallery-status" role="status" aria-live="polite"></p>
+        <div id="services-admin-list" class="services-admin-list"></div>
+      </div>
+      <p id="services-status" class="gallery-status" role="status" aria-live="polite">Cargando servicios…</p>
+      <div id="services-grid" class="services-grid" aria-live="polite"></div>
     </section>
   </main>
   <footer class="public-footer"><span>MLY Solar O&amp;M S.A.S.</span><a href="/login">Acceso para el equipo</a></footer>
@@ -49,6 +63,11 @@
     <img id="public-lightbox-image" alt="">
     <button id="public-lightbox-next" class="gallery-lightbox-nav next" type="button" aria-label="Fotografía siguiente">›</button>
     <div class="gallery-lightbox-caption"><p class="eyebrow" id="public-lightbox-category"></p><h2 id="public-lightbox-title"></h2><p id="public-lightbox-description"></p><small id="public-lightbox-location"></small><span id="public-lightbox-counter" class="gallery-lightbox-counter"></span></div>
+  </dialog>
+  <dialog id="service-details" class="service-details-dialog">
+    <button id="service-details-close" class="gallery-dialog-close" type="button" aria-label="Cerrar detalles">×</button>
+    <div class="service-details-image" id="service-details-image"></div>
+    <div class="service-details-content"><p class="eyebrow">SERVICIOS MLY SOLAR O&amp;M</p><h2 id="service-details-name"></h2><p id="service-details-description"></p><ul id="service-details-list"></ul><a id="service-quote-link" class="analyse" href="#" target="_blank" rel="noopener" hidden>Solicitar cotización</a><span id="service-contact-pending" class="service-contact-pending" hidden>Canal de contacto comercial pendiente de configuración.</span></div>
   </dialog>
   <script src="/static/public.js" defer></script>
 </body>

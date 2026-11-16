@@ -210,6 +210,33 @@ def gallery_reorder(item_ids: list[str]) -> None:
     _call("gallery_reorder", item_ids=item_ids)
 
 
+def services_list(include_hidden: bool = False) -> list[dict]:
+    result = _call("services_list", include_hidden=bool(include_hidden))
+    return result.get("items", [])
+
+
+def services_image(item_id: str, variant: str = "original", include_hidden: bool = False) -> dict:
+    return _call("services_image", item_id=item_id, variant=variant, include_hidden=bool(include_hidden))
+
+
+def services_create(item: dict) -> dict:
+    result = _call("services_create", item=item)
+    return result.get("item", {})
+
+
+def services_update(item_id: str, item: dict) -> dict:
+    result = _call("services_update", item_id=item_id, item=item)
+    return result.get("item", {})
+
+
+def services_delete(item_id: str) -> None:
+    _call("services_delete", item_id=item_id)
+
+
+def services_reorder(item_ids: list[str]) -> None:
+    _call("services_reorder", item_ids=item_ids)
+
+
 def bootstrap() -> dict:
     required = {"Clientes", "Productos_Servicios", "Configuracion", "Cotizacion", "Registro_Cotizaciones", "Detalle_Cotizaciones"}
     missing = sorted(required - _sheet_names())

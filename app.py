@@ -40,6 +40,7 @@ from xml.etree import ElementTree as ET
 import quotes as quote_store
 import google_sheets
 import gallery_store
+import service_store
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -1597,6 +1598,34 @@ class Handler(SimpleHTTPRequestHandler):
             except (sqlite3.Error, OSError):
                 self.send_json({"error": "No fue posible cargar la fotografía pública."}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        if route == "/api/public/services":
+            try:
+                items = service_store.list_services(include_hidden=False)
+                public_fields = ("id", "name", "description", "services", "published", "sortOrder", "imageAvailable", "thumbnailData")
+                contact = os.environ.get("PUBLIC_QUOTE_CONTACT_URL", "").strip()
+                parsed_contact = urlparse(contact)
+                if not ((parsed_contact.scheme == "https" and parsed_contact.netloc) or (parsed_contact.scheme in {"mailto", "tel"} and parsed_contact.path)):
+                    contact = ""
+                self.send_json({"items": [{key: item[key] for key in public_fields if key in item} for item in items if item.get("published", True)], "contactUrl": contact})
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar el portafolio de servicios."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        public_service_image_match = re.fullmatch(r"/api/public/services/([a-f0-9]{32})/image", route)
+        if public_service_image_match:
+            service_id = public_service_image_match.group(1)
+            variant = parse_qs(urlparse(self.path).query).get("variant", ["original"])[0]
+            try:
+                image, mime_type = service_store.get_image(service_id, variant, include_hidden=False)
+                self.send_bytes(image, mime_type)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar la fotografía del servicio."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if route in {"/login", "/static/login.css", "/static/login.js"}:
             if route == "/login":
                 if auth_required() and not auth_is_configured():
@@ -1625,6 +1654,31 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
             except (sqlite3.Error, OSError):
                 self.send_json({"error": "No fue posible cargar la galería."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if route == "/api/services":
+            if not self.require_auth({"admin"}):
+                return
+            try:
+                self.send_json({"items": service_store.list_services(include_hidden=True)})
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar los servicios."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        service_image_match = re.fullmatch(r"/api/services/([a-f0-9]{32})/image", route)
+        if service_image_match:
+            if not self.require_auth({"admin"}):
+                return
+            variant = parse_qs(urlparse(self.path).query).get("variant", ["original"])[0]
+            try:
+                image, mime_type = service_store.get_image(service_image_match.group(1), variant, include_hidden=True)
+                self.send_bytes(image, mime_type)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar la imagen del servicio."}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         gallery_image_match = re.fullmatch(r"/api/gallery/([a-f0-9]{32})/image", route)
         if gallery_image_match:
@@ -1810,6 +1864,37 @@ class Handler(SimpleHTTPRequestHandler):
             if self.require_auth():
                 self.send_json({"message": "Sesión cerrada"}, HTTPStatus.OK, [self.session_cookie("", 0)])
             return
+        service_update_match = re.fullmatch(r"/api/services/([a-f0-9]{32})", route)
+        if route in {"/api/services", "/api/services/reorder"} or service_update_match:
+            if not self.require_auth({"admin"}):
+                return
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < content_length <= MAX_GALLERY_REQUEST_BYTES:
+                self.send_json({"error": "La solicitud del servicio está vacía o supera el límite permitido de 5 MB."}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            try:
+                payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                if route == "/api/services/reorder":
+                    item_ids = payload.get("itemIds") if isinstance(payload, dict) else None
+                    if not isinstance(item_ids, list) or any(not isinstance(item_id, str) or not re.fullmatch(r"[a-f0-9]{32}", item_id) for item_id in item_ids):
+                        raise ValueError("La lista de orden de servicios no es válida.")
+                    service_store.reorder_services(item_ids)
+                    self.send_json({"saved": True})
+                    return
+                item = service_store.normalize_service(payload, new=not bool(service_update_match))
+                if service_update_match:
+                    self.send_json({"item": service_store.update_service(service_update_match.group(1), item)})
+                else:
+                    self.send_json({"item": service_store.create_service(item)}, HTTPStatus.CREATED)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self.send_json({"error": "Los datos del servicio no tienen un formato válido."}, HTTPStatus.BAD_REQUEST)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible guardar el servicio."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         gallery_update_match = re.fullmatch(r"/api/gallery/items/([a-f0-9]{32})", route)
         if route in {"/api/gallery/items", "/api/gallery/reorder"} or gallery_update_match:
             if not self.require_auth({"admin"}):
@@ -1984,10 +2069,22 @@ class Handler(SimpleHTTPRequestHandler):
     def do_DELETE(self):
         route = urlparse(self.path).path
         gallery_delete_match = re.fullmatch(r"/api/gallery/items/([a-f0-9]{32})", route)
-        if route not in {"/api/data", "/api/simulation/data"} and not gallery_delete_match:
+        service_delete_match = re.fullmatch(r"/api/services/([a-f0-9]{32})", route)
+        if route not in {"/api/data", "/api/simulation/data"} and not gallery_delete_match and not service_delete_match:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if not self.require_auth({"admin"}):
+            return
+        if service_delete_match:
+            try:
+                service_store.delete_service(service_delete_match.group(1))
+                self.send_json({"deleted": True})
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible eliminar el servicio."}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if gallery_delete_match:
             try:
