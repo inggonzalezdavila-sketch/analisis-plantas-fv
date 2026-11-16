@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Conoce proyectos solares realizados por MLY Solar O&M S.A.S.">
+  <title>Proyectos solares | MLY Solar O&amp;M</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/gallery.css">
+  <link rel="stylesheet" href="/static/public.css">
+</head>
+<body class="public-site">
+  <header class="app-header">
+    <div class="topbar">
+      <a class="app-brand" href="/proyectos" aria-label="MLY SolarOps, inicio público">
+        <i class="app-brand-mark" aria-hidden="true"></i>
+        <span><b>MLY <em>SOLAROPS</em></b><small>Operación | Análisis | Decisiones</small></span>
+      </a>
+      <nav class="app-nav" aria-label="Navegación pública">
+        <a href="#proyectos">Proyectos</a>
+        <a href="#portafolio">Productos y servicios</a>
+      </nav>
+      <div class="account-actions"><a class="clear" href="/login">Acceso equipo</a></div>
+    </div>
+  </header>
+  <section class="brand-header" aria-labelledby="public-hero-title">
+    <div class="brand-intro">
+      <div class="brand-kicker"><i class="brand-mark" aria-hidden="true"></i><p>MLY SOLAR O&amp;M S.A.S.</p></div>
+      <h1 id="public-hero-title">Energía solar<br>con <span>visión de futuro.</span></h1>
+      <p class="brand-subtitle">Diseño, suministro, instalación y operación de proyectos fotovoltaicos.</p>
+    </div>
+  </section>
+  <main class="public-main">
+    <section id="proyectos" class="home-gallery" aria-labelledby="projects-title">
+      <div class="gallery-heading"><div><p class="eyebrow">PROYECTOS MLY SOLAR O&amp;M</p><h2 id="projects-title">Soluciones solares en campo</h2><p class="gallery-lead">Conoce proyectos, instalaciones y trabajos realizados por nuestro equipo.</p></div></div>
+      <p id="public-gallery-status" class="gallery-status" role="status" aria-live="polite">Cargando proyectos…</p>
+      <div id="public-gallery-grid" class="gallery-grid" aria-live="polite"></div>
+    </section>
+    <section id="portafolio" class="public-portfolio" aria-labelledby="portfolio-title">
+      <p class="eyebrow">NUESTRO PORTAFOLIO</p>
+      <h2 id="portfolio-title">Productos y servicios</h2>
+      <p>Estamos preparando esta sección para presentar nuestros productos y servicios.</p>
+    </section>
+  </main>
+  <footer class="public-footer"><span>MLY Solar O&amp;M S.A.S.</span><a href="/login">Acceso para el equipo</a></footer>
+  <dialog id="public-lightbox" class="gallery-lightbox" aria-label="Fotografías del proyecto">
+    <button id="public-lightbox-close" class="gallery-dialog-close" type="button" aria-label="Cerrar fotografías">×</button>
+    <button id="public-lightbox-prev" class="gallery-lightbox-nav previous" type="button" aria-label="Fotografía anterior">‹</button>
+    <img id="public-lightbox-image" alt="">
+    <button id="public-lightbox-next" class="gallery-lightbox-nav next" type="button" aria-label="Fotografía siguiente">›</button>
+    <div class="gallery-lightbox-caption"><p class="eyebrow" id="public-lightbox-category"></p><h2 id="public-lightbox-title"></h2><p id="public-lightbox-description"></p><small id="public-lightbox-location"></small><span id="public-lightbox-counter" class="gallery-lightbox-counter"></span></div>
+  </dialog>
+  <script src="/static/public.js" defer></script>
+</body>
+</html>

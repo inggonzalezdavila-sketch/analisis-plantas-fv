@@ -1,0 +1,19 @@
+.public-site{min-height:100vh;background:#f4f7f4}
+.public-site .topbar{max-width:1240px;margin:auto;padding:10px 28px;min-height:72px;display:flex;align-items:center;justify-content:space-between;gap:22px}
+.public-site .app-nav{display:flex;align-items:center;gap:8px;margin-left:auto}
+.public-site .app-nav a{padding:10px 12px;border-radius:8px;color:#183756;text-decoration:none;font-size:13px;font-weight:800}
+.public-site .app-nav a:hover{background:#eef5f0;color:#147e60}
+.public-site .account-actions .clear{text-decoration:none}
+.public-site .brand-header{max-width:none;margin:0;border:0;border-radius:0;min-height:320px;padding:62px max(7vw,32px)!important}
+.public-site .brand-header h1{font-size:clamp(38px,5vw,62px)}
+.public-main{max-width:none;margin:0;padding:1px 0 36px}
+.public-site .home-gallery{max-width:1184px;margin:32px auto 50px;padding:0 20px}
+.public-site .gallery-heading{margin-bottom:20px}
+.public-site .gallery-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.public-portfolio{max-width:1144px;margin:0 auto 52px;padding:30px 34px;border:1px solid #d9e5dd;border-radius:16px;background:#fff}
+.public-portfolio h2{margin:0;color:#102b4e;font-size:clamp(24px,3vw,32px)}
+.public-portfolio>p:last-child{margin:9px 0 0;color:#61746b;font-size:14px;line-height:1.6}
+.public-footer{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:20px max(7vw,32px);border-top:1px solid #dce5df;background:#fff;color:#52665e;font-size:12px}
+.public-footer a{color:#147e60;font-weight:800;text-decoration:none}
+@media(max-width:900px){.public-site .topbar{padding-left:20px;padding-right:20px}.public-site .gallery-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.public-portfolio{margin-right:20px;margin-left:20px}}
+@media(max-width:680px){.public-site .topbar{flex-wrap:wrap;gap:5px 10px;padding:9px 16px}.public-site .app-brand{flex:1}.public-site .app-brand small{display:none}.public-site .app-nav{order:3;flex:1 0 100%;margin:0;overflow:auto}.public-site .app-nav a{white-space:nowrap;padding:8px 10px}.public-site .account-actions{margin-left:auto}.public-site .brand-header{min-height:250px;padding:38px 22px!important}.public-site .brand-header h1{font-size:38px}.public-site .home-gallery{margin:25px auto 36px;padding:0 16px}.public-site .gallery-grid{grid-template-columns:1fr}.public-portfolio{margin:0 16px 32px;padding:23px 20px}.public-footer{padding:18px 16px}}

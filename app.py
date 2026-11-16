@@ -1568,6 +1568,35 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         route = urlparse(self.path).path
+        if route in {"/proyectos", "/proyectos/"}:
+            self.path = "/static/public.html"
+            return super().do_GET()
+        if route in {"/static/public.css", "/static/public.js", "/static/styles.css", "/static/gallery.css", "/static/solarops-hero-v1.png"}:
+            return super().do_GET()
+        if route == "/api/public/gallery":
+            try:
+                items = gallery_store.list_items(include_hidden=False)
+                public_fields = ("id", "title", "description", "location", "category", "isCover", "sortOrder", "thumbnailData")
+                self.send_json({"items": [{key: item[key] for key in public_fields if key in item} for item in items if item.get("published", True)]})
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar la galería pública."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        public_image_match = re.fullmatch(r"/api/public/gallery/([a-f0-9]{32})/image", route)
+        if public_image_match:
+            item_id = public_image_match.group(1)
+            variant = parse_qs(urlparse(self.path).query).get("variant", ["original"])[0]
+            try:
+                image, mime_type = gallery_store.get_image(item_id, variant, include_hidden=False)
+                self.send_bytes(image, mime_type)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.NOT_FOUND)
+            except google_sheets.GoogleSheetsError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            except (sqlite3.Error, OSError):
+                self.send_json({"error": "No fue posible cargar la fotografía pública."}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if route in {"/login", "/static/login.css", "/static/login.js"}:
             if route == "/login":
                 if auth_required() and not auth_is_configured():
