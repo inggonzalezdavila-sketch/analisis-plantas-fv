@@ -181,16 +181,29 @@
     if (file.size>15*1024*1024) throw new Error('La fotografía supera el máximo de 15 MB.');
     const bitmap=await createImageBitmap(file,{imageOrientation:'from-image'});
     try {
-      const encode=async(maxDimension,quality,maxBytes)=>{
-        const scale=Math.min(1,maxDimension/Math.max(bitmap.width,bitmap.height));
-        const canvas=document.createElement('canvas');
-        canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-        const context=canvas.getContext('2d',{alpha:false});context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,canvas.height);
-        const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));
-        if (!blob||blob.size>maxBytes) throw new Error('La fotografía supera el tamaño optimizado permitido.');
-        return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('No se pudo leer la fotografía.'));reader.readAsDataURL(blob);});
+      const encode=async(maxDimension,qualities,maxBytes,label)=>{
+        let dimension=maxDimension;
+        for(let dimensionPass=0;dimensionPass<6;dimensionPass++,dimension=Math.max(160,Math.round(dimension*.78))){
+          const scale=Math.min(1,dimension/Math.max(bitmap.width,bitmap.height));
+          const canvas=document.createElement('canvas');
+          canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+          const context=canvas.getContext('2d',{alpha:false});
+          if(!context)throw new Error('El navegador no pudo preparar la fotografía.');
+          context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+          for(const quality of qualities){
+            const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));
+            if(!blob)continue;
+            if(blob.size<=maxBytes){
+              return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('No se pudo leer la fotografía optimizada.'));reader.readAsDataURL(blob);});
+            }
+          }
+        }
+        throw new Error(`No se pudo optimizar ${label} al tamaño permitido. Prueba con otra fotografía.`);
       };
-      return {imageData:await encode(1800,.82,2_000_000),thumbnailData:await encode(560,.72,32_000)};
+      return {
+        imageData:await encode(1800,[.84,.74,.64,.54,.44,.34],2_000_000,'la imagen principal'),
+        thumbnailData:await encode(560,[.76,.64,.52,.4,.3,.22],32_000,'la miniatura')
+      };
     } finally {bitmap.close();}
   }
 
