@@ -1569,6 +1569,11 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         route = urlparse(self.path).path
+        if route == "/admin/servicios":
+            if not self.require_auth({"admin"}):
+                return
+            self.path = "/static/public.html"
+            return super().do_GET()
         if route in {"/proyectos", "/proyectos/"}:
             self.path = "/static/public.html"
             return super().do_GET()

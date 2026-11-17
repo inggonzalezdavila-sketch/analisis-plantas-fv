@@ -3,7 +3,7 @@
   const projectStatus = document.querySelector('#public-gallery-status');
   const servicesGrid = document.querySelector('#services-grid');
   const servicesStatus = document.querySelector('#services-status');
-  const adminToggle = document.querySelector('#services-admin-toggle');
+  const adminPage = location.pathname === '/admin/servicios';
   const adminPanel = document.querySelector('#services-admin-panel');
   const adminList = document.querySelector('#services-admin-list');
   const adminStatus = document.querySelector('#services-admin-status');
@@ -220,7 +220,6 @@
   details.addEventListener('click',event=>{if(event.target===details)details.close();});
   document.querySelector('#service-quote-link').addEventListener('click',event=>{if(!contactUrl)event.preventDefault();});
 
-  adminToggle.addEventListener('click',()=>{adminPanel.hidden=!adminPanel.hidden;});
   document.querySelector('#services-admin-close').addEventListener('click',()=>{adminPanel.hidden=true;});
   document.querySelector('#service-editor-cancel').addEventListener('click',resetServiceForm);
   serviceForm.addEventListener('submit',async event=>{
@@ -259,21 +258,34 @@
     try {
       const sessionResponse=await fetch('/api/me');
       if(sessionResponse.ok){const session=await sessionResponse.json();isAdmin=session.user?.role==='admin';}
-      adminToggle.hidden=!isAdmin;
+      if(adminPage&&!isAdmin){location.assign('/login');return;}
+      adminPanel.hidden=!adminPage;
+      if(adminPage){
+        document.body.classList.add('services-admin-page');
+        document.querySelector('#proyectos').hidden=true;
+        document.querySelector('.brand-header').hidden=true;
+        document.querySelector('#admin-return-link').hidden=false;
+        document.querySelector('#public-login-link').hidden=true;
+        document.querySelector('#services-title').textContent='Administrar portafolio de servicios';
+      }
       try {
-        const projectData=await requestJson('/api/public/gallery');
-        const projectItems=Array.isArray(projectData.items)?projectData.items:[];
-        projectGroups=groupProjects(projectItems);renderProjects();
-        const cover=projectItems.find(item=>item.isCover);
-        if(cover)document.querySelector('.brand-header').style.setProperty('--home-cover',`url("/api/public/gallery/${encodeURIComponent(cover.id)}/image?variant=original")`);
-        projectStatus.textContent='';
+        if(!adminPage){
+          const projectData=await requestJson('/api/public/gallery');
+          const projectItems=Array.isArray(projectData.items)?projectData.items:[];
+          projectGroups=groupProjects(projectItems);renderProjects();
+          const cover=projectItems.find(item=>item.isCover);
+          if(cover)document.querySelector('.brand-header').style.setProperty('--home-cover',`url("/api/public/gallery/${encodeURIComponent(cover.id)}/image?variant=original")`);
+          projectStatus.textContent='';
+        }
       } catch(error) { projectStatus.textContent=error.message;projectStatus.classList.add('error'); }
       try {
         const serviceData=await requestJson('/api/public/services');
         contactUrl=serviceData.contactUrl||'';
         allServices=serviceData.items||[];
-        if(isAdmin){const adminData=await requestJson('/api/services');allServices=adminData.items||[];}
-        renderServices();renderAdminServices();servicesStatus.textContent='';
+        if(adminPage){const adminData=await requestJson('/api/services');allServices=adminData.items||[];}
+        renderServices();
+        if(adminPage)renderAdminServices();
+        servicesStatus.textContent='';
       } catch(error) { servicesStatus.textContent=error.message;servicesStatus.classList.add('error'); }
     } catch(error) {
       if(!projectGrid.children.length){projectGrid.innerHTML='';projectStatus.textContent=error.message;projectStatus.classList.add('error');}
