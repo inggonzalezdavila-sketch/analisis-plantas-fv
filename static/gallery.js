@@ -97,13 +97,6 @@
     }).join('');
   }
 
-  function applyCover() {
-    const cover = items.find(item => item.isCover && item.published);
-    const hero = document.querySelector('.brand-header');
-    if (cover) hero.style.setProperty('--home-cover', `url("/api/gallery/${encodeURIComponent(cover.id)}/image?variant=original")`);
-    else hero.style.removeProperty('--home-cover');
-  }
-
   async function loadGallery() {
     status.className = 'gallery-status';
     status.textContent = 'Cargando proyectos…';
@@ -113,7 +106,6 @@
       manageToggle.hidden = !isAdmin;
       items = Array.isArray(gallery.items) ? gallery.items : [];
       render();
-      applyCover();
       status.textContent = '';
     } catch (error) {
       const activationNeeded = /operación solicitada no está disponible|operación.*no está disponible/i.test(error.message);

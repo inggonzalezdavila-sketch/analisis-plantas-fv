@@ -277,8 +277,6 @@
           const projectData=await requestJson('/api/public/gallery');
           const projectItems=Array.isArray(projectData.items)?projectData.items:[];
           projectGroups=groupProjects(projectItems);renderProjects();
-          const cover=projectItems.find(item=>item.isCover);
-          if(cover)document.querySelector('.brand-header').style.setProperty('--home-cover',`url("/api/public/gallery/${encodeURIComponent(cover.id)}/image?variant=original")`);
           projectStatus.textContent='';
         }
       } catch(error) { projectStatus.textContent=error.message;projectStatus.classList.add('error'); }
