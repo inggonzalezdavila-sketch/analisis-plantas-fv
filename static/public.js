@@ -194,7 +194,7 @@
             const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/jpeg',quality));
             if(!blob)continue;
             if(blob.size<=maxBytes){
-              return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result));reader.onerror=()=>reject(new Error('No se pudo leer la fotografía optimizada.'));reader.readAsDataURL(blob);});
+              return await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>{const dataUrl=String(reader.result||'');const comma=dataUrl.indexOf(',');if(comma<0){reject(new Error('No se pudo preparar la fotografía optimizada.'));return;}resolve(dataUrl.slice(comma+1));};reader.onerror=()=>reject(new Error('No se pudo leer la fotografía optimizada.'));reader.readAsDataURL(blob);});
             }
           }
         }
