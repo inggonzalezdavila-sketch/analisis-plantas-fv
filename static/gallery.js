@@ -40,17 +40,19 @@
   function groupForDisplay(source) {
     const groups = new Map();
     for (const item of source) {
-      const match = item.title.match(/^(.*)\s+(\d+)$/);
-      const baseTitle = match ? match[1].trim() : item.title;
-      const key = match
-        ? `${baseTitle.toLocaleLowerCase('es')}|${item.category}|${item.location}|${item.description}`
-        : `single|${item.id}`;
+      const title = String(item.title || '').trim().replace(/\s+/g, ' ');
+      const match = title.match(/^(.*)\s+(\d+)$/);
+      const baseTitle = match ? match[1].trim() : title;
+      const key = [baseTitle, item.category, item.location, item.description]
+        .map(value => String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('es'))
+        .join('|');
       if (!groups.has(key)) groups.set(key, {baseTitle, numbered: Boolean(match), photos: []});
+      else if (match) groups.get(key).numbered = true;
       groups.get(key).photos.push(item);
     }
     return [...groups.values()].flatMap(group => {
       const photos = group.photos.sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
-      const grouped = group.numbered && photos.length > 1;
+      const grouped = photos.length > 1;
       return [{
         id: photos.find(photo => photo.isCover)?.id || photos.find(photo => photo.published)?.id || photos[0].id,
         title: grouped ? group.baseTitle : photos[0].title,

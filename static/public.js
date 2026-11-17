@@ -44,15 +44,19 @@
   function groupProjects(items) {
     const groups = new Map();
     for (const item of items) {
-      const match = item.title.match(/^(.*)\s+(\d+)$/);
-      const baseTitle = match ? match[1].trim() : item.title;
-      const key = match ? `${baseTitle.toLocaleLowerCase('es')}|${item.category}|${item.location}|${item.description}` : `single|${item.id}`;
+      const title = String(item.title || '').trim().replace(/\s+/g, ' ');
+      const match = title.match(/^(.*)\s+(\d+)$/);
+      const baseTitle = match ? match[1].trim() : title;
+      const key = [baseTitle, item.category, item.location, item.description]
+        .map(value => String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('es'))
+        .join('|');
       if (!groups.has(key)) groups.set(key, {baseTitle, numbered: Boolean(match), photos: []});
+      else if (match) groups.get(key).numbered = true;
       groups.get(key).photos.push(item);
     }
     return [...groups.values()].map(group => {
       group.photos.sort((a,b) => Number(a.sortOrder||0)-Number(b.sortOrder||0));
-      const grouped = group.numbered && group.photos.length > 1;
+      const grouped = group.photos.length > 1;
       return {title:grouped?group.baseTitle:group.photos[0].title,photos:group.photos,grouped};
     });
   }
